@@ -1,0 +1,113 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+      - run: cargo install cargo-zigbuild
+      - run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup target add aarch64-unknown-linux-musl
+      - run: ./build-ci.sh ${{ matrix.target }}
+      - name: Prepare assets
+        run: |
+          if [ "${{ matrix.target }}" = "arm64" ]; then
+            cp target/aarch64-unknown-linux-musl/release/http-tunnel-server http-tunnel-server-linux-arm64
+            cp target/aarch64-unknown-linux-musl/release/http-tunnel-client http-tunnel-client-linux-arm64
+            SERVER_ASSET=http-tunnel-server-linux-arm64
+            CLIENT_ASSET=http-tunnel-client-linux-arm64
+            echo "SERVER_ASSET=http-tunnel-server-linux-arm64" >> "$GITHUB_ENV"
+            echo "CLIENT_ASSET=http-tunnel-client-linux-arm64" >> "$GITHUB_ENV"
+          else
+            cp target/x86_64-unknown-linux-musl/release/http-tunnel-server http-tunnel-server-linux-amd64
+            cp target/x86_64-unknown-linux-musl/release/http-tunnel-client http-tunnel-client-linux-amd64
+            SERVER_ASSET=http-tunnel-server-linux-amd64
+            CLIENT_ASSET=http-tunnel-client-linux-amd64
+            echo "SERVER_ASSET=http-tunnel-server-linux-amd64" >> "$GITHUB_ENV"
+            echo "CLIENT_ASSET=http-tunnel-client-linux-amd64" >> "$GITHUB_ENV"
+          fi
+          sha256sum "$SERVER_ASSET" > "$SERVER_ASSET.sha256"
+          sha256sum "$CLIENT_ASSET" > "$CLIENT_ASSET.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: http-tunnel-${{ matrix.target }}
+          path: |
+            ${{ env.SERVER_ASSET }}
+            ${{ env.SERVER_ASSET }}.sha256
+            ${{ env.CLIENT_ASSET }}
+            ${{ env.CLIENT_ASSET }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: |
+          mkdir -p release-files
+          cp artifacts/http-tunnel-amd64/http-tunnel-server-linux-amd64 release-files/
+          cp artifacts/http-tunnel-amd64/http-tunnel-server-linux-amd64.sha256 release-files/
+          cp artifacts/http-tunnel-amd64/http-tunnel-client-linux-amd64 release-files/
+          cp artifacts/http-tunnel-amd64/http-tunnel-client-linux-amd64.sha256 release-files/
+          cp artifacts/http-tunnel-arm64/http-tunnel-server-linux-arm64 release-files/
+          cp artifacts/http-tunnel-arm64/http-tunnel-server-linux-arm64.sha256 release-files/
+          cp artifacts/http-tunnel-arm64/http-tunnel-client-linux-arm64 release-files/
+          cp artifacts/http-tunnel-arm64/http-tunnel-client-linux-arm64.sha256 release-files/
+      - id: version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+      - run: |
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin latest
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest Build (${{ steps.version.outputs.version }})"
+          body: |
+            Version: ${{ steps.version.outputs.version }}
+            Commit: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            Build timestamp: ${{ github.event.head_commit.timestamp }}
+
+            Assets:
+            - http-tunnel-server-linux-amd64
+            - http-tunnel-server-linux-amd64.sha256
+            - http-tunnel-client-linux-amd64
+            - http-tunnel-client-linux-amd64.sha256
+            - http-tunnel-server-linux-arm64
+            - http-tunnel-server-linux-arm64.sha256
+            - http-tunnel-client-linux-arm64
+            - http-tunnel-client-linux-arm64.sha256
+          files: release-files/*

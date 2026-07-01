@@ -1,0 +1,10 @@
+{
+  "name": "http-tunnel-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "mkdir -p ../crates/http-tunnel-server/public && cp -R src/* ../crates/http-tunnel-server/public/"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

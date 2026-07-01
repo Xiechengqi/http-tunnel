@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>http-tunnel login</title>
+  <style>body{font-family:system-ui,sans-serif;margin:0;background:#f6f7f9;color:#171717}.box{max-width:360px;margin:14vh auto;background:#fff;border:1px solid #ddd;border-radius:8px;padding:22px}h1{font-size:20px;margin:0 0 18px}input,button{font:inherit;box-sizing:border-box;width:100%;border-radius:6px;padding:10px}input{border:1px solid #bbb}button{margin-top:12px;border:1px solid #165dff;background:#165dff;color:#fff}.err{color:#a40000;min-height:20px}</style>
+</head>
+<body>
+  <main class="box"><h1>http-tunnel login</h1><input id="password" type="password" placeholder="Password" autofocus><button id="login">Login</button><p id="err" class="err"></p></main>
+  <script>login.onclick=async()=>{err.textContent="";const r=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({password:password.value})});const j=await r.json();if(!r.ok){err.textContent=j.error?.message||"Login failed";return}location.href="/admin"};password.addEventListener("keydown",e=>{if(e.key==="Enter")login.click()});</script>
+</body>
+</html>
