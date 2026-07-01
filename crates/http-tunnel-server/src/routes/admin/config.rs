@@ -885,8 +885,8 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "HTTP_TUNNEL_RELEASE_REPO",
             false,
             false,
-            "",
-            "Optional GitHub owner/repo used by upgrade checks.",
+            "Xiechengqi/http-tunnel",
+            "GitHub owner/repo used by manual and automatic upgrades.",
         ),
         schema(
             "release_tag",
@@ -895,7 +895,16 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             false,
             false,
             "latest",
-            "GitHub release tag used by upgrade checks.",
+            "GitHub release tag used by manual upgrades; automatic upgrades only track latest.",
+        ),
+        schema(
+            "auto_upgrade_enabled",
+            "Upgrade",
+            "HTTP_TUNNEL_AUTO_UPGRADE_ENABLED",
+            false,
+            false,
+            "false",
+            "Automatically install newer latest server releases while proxy traffic is idle.",
         ),
         schema(
             "systemd_unit",
@@ -968,7 +977,8 @@ fn config_field_metadata(key: &str) -> ConfigFieldMetadata {
         | "metrics_public"
         | "public_tunnel_create_enabled"
         | "allow_custom_subdomain"
-        | "require_random_subdomain" => {
+        | "require_random_subdomain"
+        | "auto_upgrade_enabled" => {
             metadata.allowed_values = &["false", "true"];
             "bool"
         }
@@ -1176,6 +1186,15 @@ mod tests {
             .find(|field| field.key == "release_repo")
             .expect("release repo schema");
         assert!(!release_repo.required);
-        assert_eq!(release_repo.default, "");
+        assert_eq!(release_repo.default, "Xiechengqi/http-tunnel");
+
+        let auto_upgrade = schema
+            .iter()
+            .find(|field| field.key == "auto_upgrade_enabled")
+            .expect("auto upgrade schema");
+        assert_eq!(auto_upgrade.value_type, "bool");
+        assert_eq!(auto_upgrade.allowed_values, ["false", "true"]);
+        assert_eq!(auto_upgrade.default, "false");
+        assert!(auto_upgrade.hot_reloadable);
     }
 }

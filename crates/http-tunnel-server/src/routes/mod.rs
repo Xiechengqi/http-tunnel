@@ -11,16 +11,22 @@ mod proxy;
 mod setup;
 mod tunnels;
 
+pub(crate) use admin::spawn_auto_upgrade_job;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(proxy::root))
         .route("/admin", get(proxy::admin))
         .route("/admin/setup", get(proxy::setup_page))
         .route("/admin/login", get(proxy::login_page))
+        .route("/icon.png", get(proxy::icon_png))
+        .route("/icon.svg", get(proxy::icon_svg))
         .route("/assets/*path", get(proxy::static_asset))
+        .route("/_next/*path", get(proxy::next_asset))
         .route("/api/v1/health", get(health::health))
         .route("/api/v1/ready", get(health::ready))
         .route("/api/v1/version", get(health::version))
+        .route("/api/v1/dashboard", get(health::dashboard))
         .route("/metrics", get(metrics::metrics))
         .route("/api/admin/setup/status", get(setup::status))
         .route("/api/admin/setup/init", post(setup::init))
@@ -94,8 +100,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/admin/maintenance/analyze", post(admin::analyze))
         .route("/api/admin/maintenance/vacuum", post(admin::vacuum))
+        .route("/api/admin/upgrade/status", get(admin::upgrade_status))
         .route("/api/admin/upgrade", post(admin::upgrade))
-        .route("/api/admin/upgrade/validate", post(admin::validate_upgrade))
         .route("/api/admin/upgrade/ws", get(admin::upgrade_ws))
         .route("/api/admin/tunnels", get(tunnels::admin_list))
         .route(

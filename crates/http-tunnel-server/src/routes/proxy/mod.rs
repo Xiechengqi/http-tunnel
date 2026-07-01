@@ -3,7 +3,7 @@ use axum::{
     body::Body,
     extract::{connect_info::ConnectInfo, Path, State},
     http::{header, Request, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http_tunnel_common::{
@@ -52,60 +52,50 @@ pub async fn root(
     }
 
     let host = request_host(&req);
-    if cfg
-        .domain
-        .as_deref()
-        .is_some_and(|domain| host == domain || host == format!("www.{domain}"))
-    {
-        root_status_page()
-    } else {
-        fallback_inner(state, req, remote_addr)
-            .await
-            .into_response()
+    let Some(domain) = cfg.domain.as_deref() else {
+        return page_response(pages::index_page());
+    };
+    if host == domain || host == format!("www.{domain}") {
+        return page_response(pages::index_page());
     }
+    if host.ends_with(&format!(".{domain}")) {
+        return fallback_inner(state, req, remote_addr)
+            .await
+            .into_response();
+    }
+    page_response(pages::index_page())
 }
 
-pub async fn admin(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn admin(State(state): State<AppState>) -> Response {
     if state.config.read().await.setup_required() {
         Redirect::temporary("/admin/setup").into_response()
     } else {
-        Html(pages::admin_html()).into_response()
+        page_response(pages::admin_page())
     }
 }
 
-pub async fn setup_page() -> Html<&'static str> {
-    Html(pages::setup_html())
+pub async fn setup_page() -> Response {
+    page_response(pages::setup_page())
 }
 
-pub async fn login_page() -> Html<&'static str> {
-    Html(pages::login_html())
+pub async fn login_page() -> Response {
+    page_response(pages::login_page())
+}
+
+pub async fn icon_png() -> Response {
+    page_response(pages::static_asset("icon.png"))
+}
+
+pub async fn icon_svg() -> Response {
+    page_response(pages::static_asset("icon.svg"))
 }
 
 pub async fn static_asset(Path(path): Path<String>) -> Response {
-    let (content_type, body) = match path.as_str() {
-        "admin.html" => ("text/html; charset=utf-8", pages::admin_html()),
-        "login.html" => ("text/html; charset=utf-8", pages::login_html()),
-        "setup.html" => ("text/html; charset=utf-8", pages::setup_html()),
-        "index.html" => ("text/html; charset=utf-8", pages::index_html()),
-        _ => {
-            return tunnel_error(
-                StatusCode::NOT_FOUND,
-                "asset_not_found",
-                "static asset was not found",
-            );
-        }
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(body))
-        .unwrap_or_else(|_| {
-            tunnel_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "asset_error",
-                "failed to serve static asset",
-            )
-        })
+    page_response(pages::static_asset(&format!("assets/{path}")))
+}
+
+pub async fn next_asset(Path(path): Path<String>) -> Response {
+    page_response(pages::static_asset(&format!("_next/{path}")))
 }
 
 pub async fn fallback(
@@ -138,7 +128,7 @@ async fn fallback_inner(state: AppState, req: Request<Body>, remote_addr: Socket
     };
 
     if host == domain || host == format!("www.{domain}") {
-        return root_status_page();
+        return page_response(pages::index_page());
     }
 
     let suffix = format!(".{domain}");
@@ -324,6 +314,27 @@ async fn fallback_inner(state: AppState, req: Request<Body>, remote_addr: Socket
         tunnel.inspector_enabled,
     )
     .await
+}
+
+fn page_response(page: Option<pages::StaticPage>) -> Response {
+    let Some(page) = page else {
+        return tunnel_error(
+            StatusCode::NOT_FOUND,
+            "asset_not_found",
+            "static asset was not found",
+        );
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, page.content_type)
+        .body(Body::from(page.body))
+        .unwrap_or_else(|_| {
+            tunnel_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "asset_error",
+                "failed to serve static asset",
+            )
+        })
 }
 
 async fn log_blocked_request(
@@ -529,11 +540,6 @@ fn request_host(req: &Request<Body>) -> String {
         .and_then(|host| host.split(':').next())
         .unwrap_or_default()
         .to_ascii_lowercase()
-}
-
-fn root_status_page() -> Response {
-    Html("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>http-tunnel</title><style>body{font-family:system-ui,sans-serif;margin:0;background:#f7f8fa;color:#171717}.wrap{max-width:900px;margin:12vh auto;padding:0 24px}h1{font-size:32px;margin:0 0 8px}.status{display:inline-block;margin-top:16px;padding:8px 12px;border:1px solid #c9d8c5;background:#edf8ea;color:#225516;border-radius:6px}</style></head><body><main class=\"wrap\"><h1>http-tunnel</h1><p>Server is running.</p><span class=\"status\">healthy</span></main></body></html>")
-        .into_response()
 }
 
 pub(crate) fn tunnel_error(

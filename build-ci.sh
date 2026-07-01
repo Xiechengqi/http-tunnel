@@ -11,13 +11,20 @@ case "$TARGET" in
   *) echo "Usage: $0 [amd64|arm64]" >&2; exit 1 ;;
 esac
 
-mkdir -p crates/http-tunnel-server/public
-cp -R dashboard/src/. crates/http-tunnel-server/public/
-printf '{"version":"%s","commit":"%s","buildTime":"%s"}\n' \
-  "$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' || true)" \
-  "$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)" \
-  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-  > crates/http-tunnel-server/public/build-info.json
+VERSION="$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' || true)"
+COMMIT="$(git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
+BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+if [ -f dashboard/package-lock.json ]; then
+  npm --prefix dashboard ci
+else
+  npm --prefix dashboard install
+fi
+
+HTTP_TUNNEL_VERSION="$VERSION" \
+HTTP_TUNNEL_COMMIT="$COMMIT" \
+HTTP_TUNNEL_BUILD_TIME="$BUILD_TIME" \
+  npm --prefix dashboard run build
 
 if command -v cargo-zigbuild >/dev/null 2>&1; then
   cargo zigbuild --release --target "$RUST_TARGET" -p http-tunnel-server

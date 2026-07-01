@@ -1,5 +1,9 @@
 <h4 align="right"><a href="README_EN.md">English</a> | <strong>简体中文</strong></h4>
 
+<p align="center">
+  <img src="dashboard/app/icon.png" alt="http-tunnel icon" width="72" height="72">
+</p>
+
 <h1 align="center">http-tunnel</h1>
 
 <p align="center"><strong>一个用 Rust 编写的 HTTP / WebSocket 隧道系统，将本地服务安全暴露到公网子域名。</strong></p>
@@ -32,7 +36,9 @@ https://<subdomain>.<domain>
 
 - 通过公网子域名访问本地 HTTP 服务，支持 GET/POST、大请求体、SSE 流式响应和 WebSocket 升级。
 - 客户端自动重连，支持本地运行态文件、`status --watch`、`disconnect`、`doctor` 和纯 NDJSON 事件输出，方便交给进程管理器托管。
+- `/` 提供公开只读 dashboard，以表格和来源地图展示隧道状态、公开地址、会话、请求、流量、最近活跃和过期时间。
 - 管理后台内置 setup/login、隧道列表、会话管理、请求/事件/审计日志、诊断包、告警、备份、维护、升级和重启入口。
+- Web UI 使用 Next.js static export、Tailwind CSS、shadcn/ui 风格组件、Tremor 指标组件和 Lucide/Fluent 图标，构建后嵌入 server binary。
 - 支持隧道级访问控制：公开访问、Bearer、Basic Auth、方法白名单、路径前缀阻断、每隧道限流和可选 Inspector 请求预览/重放。
 - 支持单连接替换/拒绝、轮询和 least-loaded 多客户端会话池，并在断开或替换前发送协议级 `GOAWAY` 以尽量排空进行中的请求。
 - 公开创建隧道可关闭、可使用管理员生成的创建令牌保护、可按 IP 限制活跃隧道数量，并可接入 Cloudflare Turnstile。
@@ -43,7 +49,7 @@ https://<subdomain>.<domain>
 
 ## 快速开始
 
-先构建二进制：
+先构建前端静态资源并编译二进制：
 
 ```bash
 ./build.sh
@@ -52,7 +58,7 @@ https://<subdomain>.<domain>
 启动 server：
 
 ```bash
-./target/release/http-tunnel-server serve
+./target/release/http-tunnel-server
 ```
 
 首次启动后打开：
@@ -131,11 +137,11 @@ cargo test -p http-tunnel-server --test e2e_http \
 - 轮换或清理创建隧道 token、metrics token、Turnstile secret。
 - 下载诊断包，查看告警，执行 SQLite WAL checkpoint、ANALYZE、VACUUM 和清理任务。
 - 创建备份，在线校验备份，离线恢复配置和数据库。
-- 校验 release 升级环境，执行 dry-run，下载带 SHA256 校验的 server 二进制并请求重启。
+- 查看 release 升级状态，下载带 SHA256 校验的 server 二进制并请求重启；自动升级会等待代理流量空闲窗口。
 
 ## 关键配置
 
-默认情况下，server 配置、SQLite 数据库和本地数据文件会保存在 `$HOME/.http-tunnel`，client 配置和运行态文件也使用同一个目录。常见配置项会保存到 `$HOME/.http-tunnel/server.toml`，也可通过命令行参数或环境变量覆盖。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
+默认情况下，server 配置、SQLite 数据库和本地数据文件会保存在 `$HOME/.http-tunnel`，client 配置和运行态文件也使用同一个目录。常见配置项会保存到 `$HOME/.http-tunnel/server.toml`，也可通过命令行参数或环境变量覆盖。公开 dashboard 的地图定位是可选离线能力，将 `GeoLite2-City.mmdb` 放到 `$HOME/.http-tunnel/GeoLite2-City.mmdb` 后即可显示已定位来源。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
 
 | 领域 | 配置 |
 | --- | --- |
@@ -144,7 +150,7 @@ cargo test -p http-tunnel-server --test e2e_http \
 | 会话池 | `session_pool_policy`、`heartbeat_interval_seconds`、`stale_session_seconds` |
 | 安全 | `public_tunnel_create_enabled`、`tunnel_create_bearer_token_hash`、`metrics_public`、`metrics_bearer_token_hash`、`turnstile_secret` |
 | 日志维护 | `request_log_retention_days`、`event_retention_days`、`session_retention_days`、`cleanup_interval_seconds` |
-| 升级重启 | `release_repo`、`release_tag`、`systemd_unit` |
+| 升级重启 | `release_repo`、`release_tag`、`auto_upgrade_enabled`、`systemd_unit` |
 
 ## 文档
 

@@ -3,6 +3,7 @@ mod backup;
 mod cli;
 mod db;
 mod error;
+mod geoip;
 mod net;
 mod redaction;
 mod routes;
@@ -25,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Command::Serve { config: None }) {
         Command::Serve { config } => {
             let config_path = config_path(config);
             let cfg = ServerConfig::load(&config_path)

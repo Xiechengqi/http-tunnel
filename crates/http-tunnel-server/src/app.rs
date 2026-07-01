@@ -19,6 +19,7 @@ pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<
     let pool = db::connect(&config.database_url).await?;
     let state = AppState::new(config_path, config, pool);
     spawn_cleanup_job(state.clone());
+    routes::spawn_auto_upgrade_job(state.clone());
 
     let app = Router::new()
         .merge(routes::router())

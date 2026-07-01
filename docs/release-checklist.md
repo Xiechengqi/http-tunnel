@@ -7,7 +7,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./build.sh
-cmp -s dashboard/src/admin.html crates/http-tunnel-server/public/admin.html
+test -f crates/http-tunnel-server/public/index.html
+test -d crates/http-tunnel-server/public/_next/static
 ```
 
 CI/release asset checks:
@@ -22,7 +23,7 @@ These names must match the server upgrade resolver. Accepted checksum names are 
 
 Deployment smoke:
 
-- Start `http-tunnel-server serve` and confirm defaults are created under `$HOME/.http-tunnel`.
+- Start `http-tunnel-server` and confirm defaults are created under `$HOME/.http-tunnel`.
 - Complete `/admin/setup`.
 - Verify `/api/v1/ready` returns ready after setup and database initialization.
 - Log in at `/admin/login`.
@@ -33,9 +34,9 @@ Deployment smoke:
 - Verify WebSocket echo.
 - Trigger admin disconnect and verify client reconnect.
 - Confirm `/metrics` rejects unauthenticated public access unless `metrics_public = true`, and succeeds through admin auth or the dedicated metrics bearer token.
-- Run `/api/admin/upgrade/validate`.
-- Run `POST /api/admin/upgrade` with `{"dry_run": true}`.
-- Confirm upgrade validation or dry-run reports the expected SHA256 checksum.
+- Confirm `GET /api/admin/upgrade/status` reports the expected release repo, tag, automatic upgrade setting, and last automatic check status.
+- Run `POST /api/admin/upgrade` in staging to verify SHA256-checked binary replacement and restart behavior.
+- Confirm same-version upgrades are skipped instead of repeatedly replacing the binary.
 - Confirm `/api/admin/config/schema` includes value types, allowed values, ranges, and restart metadata.
 - Rotate and clear secret-backed settings in staging: tunnel creation token, metrics token, and Turnstile secret.
 - Create a backup, run `POST /api/admin/restore/validate`, run CLI restore with `--dry-run`, and confirm the reported config/database destinations are expected.

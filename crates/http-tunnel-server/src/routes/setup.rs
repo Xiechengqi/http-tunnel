@@ -23,12 +23,11 @@ pub struct SetupStatus {
 #[derive(Debug, Deserialize)]
 pub struct SetupInitRequest {
     pub admin_password: String,
-    pub confirm_password: String,
+    pub confirm_password: Option<String>,
     pub domain: String,
     pub public_scheme: String,
     pub addr: Option<String>,
-    pub database_url: String,
-    pub release_repo: Option<String>,
+    pub database_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,21 +60,20 @@ pub async fn init(
             "admin password must be at least 8 characters",
         ));
     }
-    if req.admin_password != req.confirm_password {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "password_mismatch",
-            "password confirmation does not match",
-        ));
+    if let Some(confirm_password) = req.confirm_password.as_deref() {
+        if req.admin_password != confirm_password {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "password_mismatch",
+                "password confirmation does not match",
+            ));
+        }
     }
-    if req.domain.trim().is_empty()
-        || req.public_scheme.trim().is_empty()
-        || req.database_url.trim().is_empty()
-    {
+    if req.domain.trim().is_empty() || req.public_scheme.trim().is_empty() {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "missing_required_field",
-            "domain, public scheme, and database URL are required",
+            "domain and public scheme are required",
         ));
     }
 
@@ -88,9 +86,8 @@ pub async fn init(
             .parse::<SocketAddr>()
             .map_err(|e| AppError::new(StatusCode::BAD_REQUEST, "invalid_addr", e.to_string()))?;
     }
-    new_cfg.database_url = req.database_url.trim().to_string();
-    if let Some(repo) = req.release_repo.filter(|s| !s.trim().is_empty()) {
-        new_cfg.release_repo = repo;
+    if let Some(database_url) = req.database_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        new_cfg.database_url = database_url.trim().to_string();
     }
     let errors = validate_server_config(&new_cfg);
     if !errors.is_empty() {

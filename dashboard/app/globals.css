@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 204 93% 49%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 94%;
+    --secondary-foreground: 222 47% 14%;
+    --muted: 210 40% 94%;
+    --muted-foreground: 215 16% 42%;
+    --accent: 187 78% 38%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 88%;
+    --input: 214 32% 88%;
+    --ring: 204 93% 49%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 96%;
+    --card: 222 35% 9%;
+    --card-foreground: 210 40% 96%;
+    --primary: 204 93% 49%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 222 26% 14%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 222 22% 14%;
+    --muted-foreground: 215 16% 68%;
+    --accent: 187 78% 42%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 20% 20%;
+    --input: 220 20% 20%;
+    --ring: 204 93% 49%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  a {
+    @apply text-primary underline-offset-4 hover:underline;
+  }
+}
+
+@layer components {
+  .ops-shell {
+    @apply min-h-screen bg-background text-foreground;
+  }
+
+  .ops-panel {
+    @apply rounded-lg border border-border bg-card text-card-foreground shadow-sm;
+  }
+
+  .ops-muted {
+    @apply text-muted-foreground;
+  }
+
+  .ops-status-dot {
+    @apply inline-block h-2.5 w-2.5 rounded-full;
+  }
+}

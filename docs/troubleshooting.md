@@ -35,8 +35,8 @@ Cloudflare:
 Upgrade rollback:
 
 - Upgrade backs up the current binary as `<current_exe>.bak`.
-- Run `POST /api/admin/upgrade` with `{"dry_run": true}` before replacing binaries.
-- If upgrade dry-run fails with `upgrade_checksum_missing`, publish `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt` with the matching server asset SHA256.
+- Check `GET /api/admin/upgrade/status` before replacing binaries.
+- If upgrade fails with `upgrade_checksum_missing`, publish `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt` with the matching server asset SHA256.
 - If replacement fails, the backup is copied back over the current executable.
 - Restart after upgrade is attempted through `systemd-run`, `systemctl`, then Unix exec. If all methods fail, start the backed-up or replaced binary manually under the same supervisor.
 

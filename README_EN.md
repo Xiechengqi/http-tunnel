@@ -32,7 +32,9 @@ The supported runtime path is binary-only. The project focuses on reliable HTTP 
 
 - Expose local HTTP services through public subdomains, including GET/POST, large request bodies, SSE streaming, and WebSocket upgrades.
 - Client reconnects automatically and includes runtime state files, `status --watch`, `disconnect`, `doctor`, and pure NDJSON events for supervisors.
+- `/` serves a public read-only dashboard with a tunnel table and source map for status, public URL, sessions, requests, traffic, last seen time, and expiry.
 - Built-in admin dashboard for setup/login, tunnels, sessions, requests, events, audit logs, diagnostics, alerts, backup, maintenance, upgrade, and restart.
+- Web UI uses Next.js static export, Tailwind CSS, shadcn/ui-style components, Tremor metric components, and Lucide/Fluent icons, then embeds the exported assets into the server binary.
 - Per-tunnel access controls: public, Bearer, Basic Auth, allowed methods, blocked path prefixes, per-tunnel rate limits, and optional Inspector previews/replay.
 - Session policies for replace/reject, round-robin, and least-loaded pools. Disconnect/replacement sends protocol `GOAWAY` and briefly drains active streams.
 - Public tunnel creation can be disabled, protected with an admin-generated creation token, capped per IP, and optionally guarded by Cloudflare Turnstile.
@@ -43,7 +45,7 @@ The supported runtime path is binary-only. The project focuses on reliable HTTP 
 
 ## Quick Start
 
-Build the binaries:
+Build the static frontend and binaries:
 
 ```bash
 ./build.sh
@@ -52,7 +54,7 @@ Build the binaries:
 Start the server:
 
 ```bash
-./target/release/http-tunnel-server serve
+./target/release/http-tunnel-server
 ```
 
 Open first-time setup:
@@ -131,11 +133,11 @@ The admin dashboard is available at `/admin`; first-time setup is at `/admin/set
 - Rotate or clear tunnel creation tokens, metrics tokens, and Turnstile secrets.
 - Download diagnostics, review alerts, and run SQLite WAL checkpoint, ANALYZE, VACUUM, and cleanup tasks.
 - Create backups, validate backups online, and restore config/database offline.
-- Validate release upgrade settings, run dry-runs, install SHA256-verified server binaries, and request restart.
+- Review release upgrade status, install SHA256-verified server binaries, and request restart; automatic upgrades wait for an idle proxy-traffic window.
 
 ## Key Configuration
 
-By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
+By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. Public dashboard map geolocation is optional and offline-only; place `GeoLite2-City.mmdb` at `$HOME/.http-tunnel/GeoLite2-City.mmdb` to show located sources. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
 
 | Area | Settings |
 | --- | --- |
@@ -144,7 +146,7 @@ By default, server config, the SQLite database, and local data files live in `$H
 | Session pools | `session_pool_policy`, `heartbeat_interval_seconds`, `stale_session_seconds` |
 | Security | `public_tunnel_create_enabled`, `tunnel_create_bearer_token_hash`, `metrics_public`, `metrics_bearer_token_hash`, `turnstile_secret` |
 | Log maintenance | `request_log_retention_days`, `event_retention_days`, `session_retention_days`, `cleanup_interval_seconds` |
-| Upgrade/restart | `release_repo`, `release_tag`, `systemd_unit` |
+| Upgrade/restart | `release_repo`, `release_tag`, `auto_upgrade_enabled`, `systemd_unit` |
 
 ## Documentation
 

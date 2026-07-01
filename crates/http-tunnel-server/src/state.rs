@@ -5,9 +5,9 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,6 +21,8 @@ pub struct AppState {
     pub admin_login_hits: Arc<RwLock<HashMap<String, VecDeque<Instant>>>>,
     pub per_tunnel_hits: Arc<RwLock<HashMap<String, VecDeque<Instant>>>>,
     pub upgrade_events: broadcast::Sender<String>,
+    pub upgrade_lock: Arc<Mutex<()>>,
+    pub last_proxy_activity_unix_ms: Arc<AtomicU64>,
     pub started_at: SystemTime,
     next_stream_id: Arc<AtomicU64>,
 }
@@ -151,6 +153,8 @@ impl AppState {
             admin_login_hits: Arc::new(RwLock::new(HashMap::new())),
             per_tunnel_hits: Arc::new(RwLock::new(HashMap::new())),
             upgrade_events,
+            upgrade_lock: Arc::new(Mutex::new(())),
+            last_proxy_activity_unix_ms: Arc::new(AtomicU64::new(unix_now_millis())),
             started_at: SystemTime::now(),
             next_stream_id: Arc::new(AtomicU64::new(1)),
         }
@@ -256,11 +260,13 @@ impl AppState {
         let selected = pool.sessions.get(index).cloned();
         if let Some(session) = selected.as_ref() {
             session.mark_selected();
+            self.mark_proxy_activity();
         }
         selected
     }
 
     pub async fn insert_pending_stream(&self, stream_id: u64, stream: PendingStream) {
+        self.mark_proxy_activity();
         stream.session_metrics.stream_started();
         self.pending_streams.write().await.insert(stream_id, stream);
     }
@@ -269,6 +275,7 @@ impl AppState {
         let stream = self.pending_streams.write().await.remove(&stream_id);
         if let Some(stream) = stream.as_ref() {
             stream.session_metrics.stream_finished();
+            self.mark_proxy_activity();
         }
         stream
     }
@@ -291,7 +298,24 @@ impl AppState {
                 removed.push((stream_id, stream));
             }
         }
+        if !removed.is_empty() {
+            self.mark_proxy_activity();
+        }
         removed
+    }
+
+    pub fn mark_proxy_activity(&self) {
+        self.last_proxy_activity_unix_ms
+            .store(unix_now_millis(), Ordering::Relaxed);
+    }
+
+    pub async fn proxy_idle_for(&self, duration: Duration) -> bool {
+        if !self.pending_streams.read().await.is_empty() {
+            return false;
+        }
+        let last = self.last_proxy_activity_unix_ms.load(Ordering::Relaxed);
+        unix_now_millis().saturating_sub(last)
+            >= u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
     }
 
     pub async fn pending_stream_count_for_session(

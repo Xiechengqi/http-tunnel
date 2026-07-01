@@ -43,7 +43,8 @@ pub use logs::{
     requests_export,
 };
 pub use maintenance::{analyze, maintenance_status, vacuum, wal_checkpoint};
-pub use upgrade::{restart, upgrade, upgrade_ws, validate_upgrade};
+pub(crate) use upgrade::spawn_auto_upgrade_job;
+pub use upgrade::{restart, upgrade, upgrade_status, upgrade_ws};
 
 pub(crate) struct AuditLog<'a> {
     pub actor_token: Option<&'a str>,

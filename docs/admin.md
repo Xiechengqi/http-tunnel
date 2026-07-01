@@ -2,6 +2,8 @@
 
 On first launch, open `/admin/setup`, initialize the password and runtime config, then log in at `/admin/login`.
 
+The public dashboard is served at `/` and shows a read-only tunnel overview: status, public URL, source region, active sessions/streams, request/error counts, traffic totals, last seen time, expiry, and a source map when local GeoIP data is available. The authenticated operations console is served at `/admin`.
+
 Admin auth is password-only. Login returns a bearer token for API clients and sets an httpOnly signed session cookie for the browser UI. Browser sessions and bearer tokens expire server-side after seven days.
 
 Cookie-authenticated mutating admin APIs require `X-CSRF-Token`; the dashboard sends it automatically from the `http_tunnel_csrf` cookie. Bearer-token API clients are exempt from CSRF checks.
@@ -12,6 +14,7 @@ Useful endpoints:
 
 ```text
 GET  /api/v1/ready
+GET  /api/v1/dashboard
 GET  /api/admin/status
 GET  /api/admin/alerts
 GET  /api/admin/diagnostics
@@ -55,28 +58,28 @@ POST /api/admin/maintenance/analyze
 POST /api/admin/maintenance/vacuum
 POST /api/admin/backup
 POST /api/admin/restore/validate
-POST /api/admin/upgrade/validate
+GET  /api/admin/upgrade/status
 POST /api/admin/upgrade
 POST /api/admin/restart
 ```
 
 `GET /api/v1/ready` returns `200` when setup is complete and the database answers `SELECT 1`. It returns `503` while setup is still required or the database readiness check fails.
 
+`GET /api/v1/dashboard` returns public tunnel data only. It intentionally excludes admin-only configuration such as access policies, tokens, rate limits, inspector settings, full client IPs, audit data, and database/runtime internals. To enable map coordinates, place `GeoLite2-City.mmdb` in the configured data directory, which defaults to `$HOME/.http-tunnel`.
+
 `GET /metrics` returns Prometheus text format with active session, active stream, tunnel status, request, byte, WebSocket session/message, disconnect reason, reconnect token, stale-session, and audit counters. It is protected by default. Access is allowed when `metrics_public = true`, when the direct peer IP matches `trusted_proxy_cidrs`, when the request is authenticated as admin, or when `Authorization: Bearer <token>` matches the dedicated `metrics_bearer_token_hash`.
 
 `GET /api/admin/sessions` returns active and revoked admin sessions with IP, user agent, created time, expiry, and current-session marker. `POST /api/admin/sessions/revoke-all` revokes every active session except the caller.
 
-Upgrade dry-run:
+Upgrade status:
 
 ```bash
-curl -X POST /api/admin/upgrade \
-  -H 'content-type: application/json' \
-  -d '{"dry_run": true}'
+curl /api/admin/upgrade/status
 ```
 
-Dry-run resolves the release asset, fetches a SHA256 checksum, and checks local write permissions without replacing the running binary. Upgrade validation also reports available restart methods and checksum metadata when a checksum asset exists. Upgrade progress is streamed from `/api/admin/upgrade/ws` for dashboard clients.
+Upgrade status reports the configured release repository, effective default repository, release tag, automatic upgrade setting, last automatic check result, and available restart methods. Upgrade progress is streamed from `/api/admin/upgrade/ws` for dashboard clients.
 
-Upgrade checksum assets must be published beside the server asset. The resolver accepts `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt`. Aggregate checksum files must contain a 64-character SHA256 value and the matching server asset filename. `POST /api/admin/upgrade` rejects dry-runs and replacements when a checksum cannot be found or parsed, and verifies the downloaded binary before the `--help` probe and replacement.
+Upgrade checksum assets must be published beside the server asset. The resolver accepts `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt`. Aggregate checksum files must contain a 64-character SHA256 value and the matching server asset filename. `POST /api/admin/upgrade` skips same-version/current-checksum releases, rejects missing or unparsable checksums, and verifies the downloaded binary before the `--help` probe and replacement.
 
 `pending_restart` is persisted when restart-required config fields change, including listen address, domain, public scheme, database URL, and data dir.
 
@@ -149,7 +152,7 @@ The backup archive includes `manifest.json`, `config/server.toml`, the SQLite da
 
 The database records applied schema versions in `schema_versions`; current fresh installs record `initial`.
 
-The admin dashboard is organized into Overview, Tunnels, Activity, Security, Config, Maintenance, and Version tabs. It can manage runtime config, apply local schema-based validation before save, view schema metadata, copy or download diagnostics, view alerts, filter/paginate tunnels and logs, export request/audit CSV files for the current page or filtered result set, inspect tunnel detail, toggle Inspector, edit tunnel access/rules with a form, view audit logs, manage admin sessions, rotate tunnel tokens, rotate or clear secret-backed config values, extend/expire/enable/disable/disconnect/delete tunnels, run cleanup and DB maintenance, download backups, validate backup archives, change the admin password, validate upgrade settings, and request restart/upgrade. Request logs show request ID, type, method, path, host, remote IP, user agent, status, duration, byte counts, errors, replay lineage, WebSocket close/message metadata, and optional Inspector previews.
+The admin dashboard is organized into Overview, Tunnels, Activity, Security, Config, Maintenance, and Version tabs. It can manage runtime config, apply local schema-based validation before save, view schema metadata, copy or download diagnostics, view alerts, filter/paginate tunnels and logs, export request/audit CSV files for the current page or filtered result set, inspect tunnel detail, toggle Inspector, edit tunnel access/rules with a form, view audit logs, manage admin sessions, rotate tunnel tokens, rotate or clear secret-backed config values, extend/expire/enable/disable/disconnect/delete tunnels, run cleanup and DB maintenance, download backups, validate backup archives, change the admin password, inspect automatic upgrade status, and request restart/upgrade. Request logs show request ID, type, method, path, host, remote IP, user agent, status, duration, byte counts, errors, replay lineage, WebSocket close/message metadata, and optional Inspector previews.
 
 Public tunnel deletion through `DELETE /api/v1/tunnels/:id` requires the tunnel token via `Authorization: Bearer <token>` or `?token=`.
 

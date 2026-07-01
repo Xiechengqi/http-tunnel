@@ -27,9 +27,9 @@ Use this checklist before operating a public instance for sustained traffic.
 
 ## Upgrade
 
-- Run `/api/admin/upgrade/validate` before replacing a binary.
-- Run `POST /api/admin/upgrade` with `{"dry_run": true}`.
-- In staging, test binary replacement, restart fallback, and rollback from `<current_exe>.bak`.
+- Check `GET /api/admin/upgrade/status` before replacing a binary.
+- In staging, test binary replacement, restart fallback, same-version skip behavior, and rollback from `<current_exe>.bak`.
+- If `auto_upgrade_enabled = true`, confirm automatic upgrade waits for the configured idle window before replacing the server binary.
 - Confirm the release assets and SHA256 checksum assets use the names expected by the upgrade resolver.
 
 ## Security

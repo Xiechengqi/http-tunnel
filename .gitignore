@@ -2,6 +2,13 @@
 /data/
 /.http-tunnel/
 /crates/http-tunnel-server/public/build-info.json
+/crates/http-tunnel-server/public/_next/
+/dashboard/.next/
+/dashboard/out/
+/dashboard/node_modules/
+/dashboard/tsconfig.tsbuildinfo
+/http-tunnel-client
+/http-tunnel-server
 
 *.sqlite
 *.sqlite3

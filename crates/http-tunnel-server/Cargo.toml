@@ -17,6 +17,8 @@ http-tunnel-protocol = { path = "../http-tunnel-protocol" }
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+include_dir.workspace = true
+maxminddb.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

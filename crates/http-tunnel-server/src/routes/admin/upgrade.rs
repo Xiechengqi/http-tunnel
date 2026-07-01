@@ -12,13 +12,19 @@ use axum::{
 use http_tunnel_common::{api::ApiResponse, ServerConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::Row;
 use std::{
+    cmp::Ordering as VersionOrdering,
     fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::Duration,
 };
+
+const DEFAULT_RELEASE_REPO: &str = "Xiechengqi/http-tunnel";
+const AUTO_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(300);
+const AUTO_UPGRADE_IDLE_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 pub struct TokenQuery {
@@ -43,37 +49,35 @@ pub struct RestartMethodCheck {
 }
 
 #[derive(Debug, Serialize)]
-pub struct UpgradeValidationResponse {
+pub struct UpgradeStatus {
+    pub auto_upgrade_enabled: bool,
     pub release_repo: String,
+    pub effective_release_repo: String,
     pub release_tag: String,
-    pub asset_name: String,
-    pub resolved_tag: Option<String>,
-    pub asset_url: Option<String>,
-    pub current_exe: Option<String>,
-    pub current_exe_writable: bool,
-    pub backup_parent_writable: bool,
-    pub temp_dir_writable: bool,
-    pub systemd_unit_configured: bool,
-    pub systemd_unit_found: bool,
+    pub current_version: String,
+    pub check_interval_seconds: u64,
+    pub idle_window_seconds: u64,
+    pub upgrade_in_progress: bool,
     pub restart_methods: Vec<&'static str>,
     pub restart_method_checks: Vec<RestartMethodCheck>,
-    pub checksum_url: Option<String>,
-    pub checksum_sha256: Option<String>,
+    pub last_checked_at: Option<String>,
+    pub last_result: Option<String>,
+    pub last_message: Option<String>,
+    pub latest_tag: Option<String>,
+    pub update_available: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct UpgradeResponse {
     pub started: bool,
     pub message: String,
+    pub current_version: String,
+    pub resolved_tag: Option<String>,
+    pub update_available: bool,
     pub asset_name: Option<String>,
     pub backup_path: Option<String>,
     pub restart_method: Option<String>,
     pub checksum_sha256: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct UpgradeRequest {
-    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +98,14 @@ struct ReleaseAsset {
     asset_name: String,
     download_url: String,
     checksum_url: Option<String>,
+}
+
+struct UpgradeCandidate {
+    asset: ReleaseAsset,
+    expected_checksum: String,
+    current_exe: PathBuf,
+    backup_path: PathBuf,
+    update_available: bool,
 }
 
 pub async fn restart(
@@ -130,46 +142,41 @@ pub async fn restart(
     })))
 }
 
-pub async fn validate_upgrade(
+pub async fn upgrade_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<ApiResponse<UpgradeValidationResponse>>> {
+) -> Result<Json<ApiResponse<UpgradeStatus>>> {
     require_admin(&state, &headers).await?;
     let cfg = state.config.read().await.clone();
-    let resolved = if cfg.release_repo.trim().is_empty() {
-        None
-    } else {
-        resolve_release_asset(&cfg).await.ok()
+    let upgrade_in_progress = match state.upgrade_lock.try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            false
+        }
+        Err(_) => true,
     };
-    let checksum_sha256 = match resolved.as_ref() {
-        Some(asset) => fetch_expected_checksum(asset).await.ok(),
-        None => None,
-    };
-    Ok(Json(ApiResponse::ok(UpgradeValidationResponse {
-        release_repo: cfg.release_repo,
+    Ok(Json(ApiResponse::ok(UpgradeStatus {
+        auto_upgrade_enabled: cfg.auto_upgrade_enabled,
+        release_repo: cfg.release_repo.clone(),
+        effective_release_repo: effective_release_repo(&cfg),
         release_tag: cfg.release_tag,
-        asset_name: server_asset_name(),
-        resolved_tag: resolved.as_ref().map(|asset| asset.tag_name.clone()),
-        asset_url: resolved.as_ref().map(|asset| asset.download_url.clone()),
-        current_exe: std::env::current_exe()
-            .ok()
-            .map(|path| path.display().to_string()),
-        current_exe_writable: std::env::current_exe()
-            .ok()
-            .is_some_and(|path| is_writable_file(&path)),
-        backup_parent_writable: std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf))
-            .is_some_and(|path| is_writable_dir(&path)),
-        temp_dir_writable: is_writable_dir(&std::env::temp_dir()),
-        systemd_unit_configured: cfg.systemd_unit.is_some(),
-        systemd_unit_found: cfg.systemd_unit.as_deref().is_some_and(systemd_unit_exists),
+        current_version: current_version(),
+        check_interval_seconds: AUTO_UPGRADE_CHECK_INTERVAL.as_secs(),
+        idle_window_seconds: AUTO_UPGRADE_IDLE_WINDOW.as_secs(),
+        upgrade_in_progress,
         restart_methods: restart_methods(cfg.systemd_unit.as_deref()),
         restart_method_checks: restart_method_checks(cfg.systemd_unit.as_deref()),
-        checksum_url: resolved
-            .as_ref()
-            .and_then(|asset| asset.checksum_url.clone()),
-        checksum_sha256,
+        last_checked_at: upgrade_setting(&state, "auto_upgrade_last_checked_at").await?,
+        last_result: upgrade_setting(&state, "auto_upgrade_last_result").await?,
+        last_message: upgrade_setting(&state, "auto_upgrade_last_message").await?,
+        latest_tag: upgrade_setting(&state, "auto_upgrade_latest_tag").await?,
+        update_available: upgrade_setting(&state, "auto_upgrade_update_available")
+            .await?
+            .and_then(|value| match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }),
     })))
 }
 
@@ -177,11 +184,19 @@ pub async fn upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
-    payload: Option<Json<UpgradeRequest>>,
 ) -> Result<Json<ApiResponse<UpgradeResponse>>> {
     let actor = require_admin_write(&state, &headers).await?;
     let cfg = state.config.read().await.clone();
-    if cfg.release_repo.trim().is_empty() {
+    let Ok(_guard) = state.upgrade_lock.try_lock() else {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            "upgrade_in_progress",
+            "another upgrade is already running",
+        ));
+    };
+    emit_upgrade_event(&state, "resolving", "resolving release asset");
+    let candidate = prepare_upgrade_candidate(&cfg).await?;
+    if !candidate.update_available {
         record_admin_audit(
             &state,
             &headers,
@@ -190,79 +205,30 @@ pub async fn upgrade(
                 actor_token: Some(&actor),
                 action: "upgrade",
                 target_type: Some("release"),
-                target_id: Some(&cfg.release_repo),
+                target_id: Some(&candidate.asset.asset_name),
                 result: "skipped",
-                detail: Some("release repository is not configured"),
+                detail: Some("current server binary already matches the selected release"),
             },
         )
         .await?;
         return Ok(Json(ApiResponse::ok(UpgradeResponse {
             started: false,
-            message: "release repository is not configured".to_string(),
-            asset_name: None,
+            message: "current server binary already matches the selected release".to_string(),
+            current_version: current_version(),
+            resolved_tag: Some(candidate.asset.tag_name),
+            update_available: false,
+            asset_name: Some(candidate.asset.asset_name),
             backup_path: None,
             restart_method: None,
-            checksum_sha256: None,
+            checksum_sha256: Some(candidate.expected_checksum),
         })));
     }
-    emit_upgrade_event(&state, "resolving", "resolving release asset");
-    let asset = resolve_release_asset(&cfg).await?;
-    let expected_checksum = fetch_expected_checksum(&asset).await?;
-    let current_exe = std::env::current_exe().map_err(AppError::internal)?;
-    let backup_path = backup_path(&current_exe);
-    if payload
-        .as_ref()
-        .and_then(|Json(req)| req.dry_run)
-        .unwrap_or(false)
-    {
-        let parent = current_exe.parent().unwrap_or_else(|| Path::new("."));
-        if !is_writable_file(&current_exe)
-            || !is_writable_dir(parent)
-            || !is_writable_dir(&std::env::temp_dir())
-        {
-            return Err(AppError::new(
-                StatusCode::BAD_REQUEST,
-                "upgrade_environment_not_writable",
-                "current executable, backup directory, or temp directory is not writable",
-            ));
-        }
-        emit_upgrade_event(&state, "dry_run_passed", "dry run passed");
-        record_admin_audit(
-            &state,
-            &headers,
-            remote_addr,
-            AuditLog {
-                actor_token: Some(&actor),
-                action: "upgrade_dry_run",
-                target_type: Some("release"),
-                target_id: Some(&asset.asset_name),
-                result: "success",
-                detail: Some(&asset.tag_name),
-            },
-        )
-        .await?;
-        return Ok(Json(ApiResponse::ok(UpgradeResponse {
-            started: false,
-            message: "dry run passed; release asset and local paths are usable".to_string(),
-            asset_name: Some(asset.asset_name),
-            backup_path: Some(backup_path.display().to_string()),
-            restart_method: None,
-            checksum_sha256: Some(expected_checksum),
-        })));
-    }
-    let tmp_path = std::env::temp_dir().join(&asset.asset_name);
-    emit_upgrade_event(&state, "downloading", "downloading release asset");
-    download_asset(&asset.download_url, &tmp_path).await?;
-    emit_upgrade_event(&state, "verifying", "verifying downloaded binary");
-    verify_file_sha256(&tmp_path, &expected_checksum)?;
-    make_executable(&tmp_path)?;
-    verify_binary(&tmp_path)?;
-    emit_upgrade_event(&state, "replacing", "replacing current binary");
-    replace_binary(&tmp_path, &current_exe, &backup_path)?;
-    add_audit_event(
+    let response = install_upgrade_candidate(
         &state,
+        &cfg,
+        candidate,
         "admin_upgrade_installed",
-        Some(&format!("{} from {}", asset.asset_name, asset.tag_name)),
+        "admin_restart_requested",
     )
     .await?;
     record_admin_audit(
@@ -273,24 +239,165 @@ pub async fn upgrade(
             actor_token: Some(&actor),
             action: "upgrade",
             target_type: Some("release"),
-            target_id: Some(&asset.asset_name),
+            target_id: response.asset_name.as_deref(),
             result: "success",
-            detail: Some(&asset.tag_name),
+            detail: response.resolved_tag.as_deref(),
         },
     )
     .await?;
-    emit_upgrade_event(&state, "restarting", "requesting service restart");
-    let restart = request_restart(cfg.systemd_unit.as_deref())?;
-    add_audit_event(&state, "admin_restart_requested", restart.method).await?;
-    emit_upgrade_event(&state, "complete", &restart.message);
-    Ok(Json(ApiResponse::ok(UpgradeResponse {
-        started: true,
-        message: format!("installed {}; {}", asset.asset_name, restart.message),
-        asset_name: Some(asset.asset_name),
-        backup_path: Some(backup_path.display().to_string()),
-        restart_method: restart.method.map(ToString::to_string),
-        checksum_sha256: Some(expected_checksum),
-    })))
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+pub(crate) fn spawn_auto_upgrade_job(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = auto_upgrade_once(&state).await {
+                tracing::warn!(%error, "automatic upgrade check failed");
+                let _ = record_auto_upgrade_status(
+                    &state,
+                    "error",
+                    &format!("automatic upgrade check failed: {error}"),
+                    None,
+                    None,
+                )
+                .await;
+            }
+            tokio::time::sleep(AUTO_UPGRADE_CHECK_INTERVAL).await;
+        }
+    });
+}
+
+async fn auto_upgrade_once(state: &AppState) -> Result<()> {
+    let cfg = state.config.read().await.clone();
+    if !cfg.auto_upgrade_enabled {
+        record_auto_upgrade_status(
+            state,
+            "disabled",
+            "automatic upgrade is disabled",
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    if cfg.setup_required() {
+        record_auto_upgrade_status(state, "skipped", "setup is not complete", None, None).await?;
+        return Ok(());
+    }
+    if cfg.release_tag.trim() != "latest" {
+        record_auto_upgrade_status(
+            state,
+            "skipped",
+            "automatic upgrade only tracks the latest release tag",
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let candidate = prepare_upgrade_candidate(&cfg).await?;
+    if !candidate.update_available {
+        let message = format!(
+            "no newer release found; current={} latest={}",
+            current_version(),
+            candidate.asset.tag_name
+        );
+        record_auto_upgrade_status(
+            state,
+            "no_update",
+            &message,
+            Some(candidate.asset.tag_name.as_str()),
+            Some(false),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let waiting_message = format!(
+        "new release {} is available; waiting for {}s without tunnel proxy traffic",
+        candidate.asset.tag_name,
+        AUTO_UPGRADE_IDLE_WINDOW.as_secs()
+    );
+    record_auto_upgrade_status(
+        state,
+        "waiting_idle",
+        &waiting_message,
+        Some(candidate.asset.tag_name.as_str()),
+        Some(true),
+    )
+    .await?;
+    if !wait_for_auto_upgrade_idle(state).await {
+        return Ok(());
+    }
+
+    let Ok(_guard) = state.upgrade_lock.try_lock() else {
+        record_auto_upgrade_status(
+            state,
+            "skipped",
+            "another upgrade is already running",
+            Some(candidate.asset.tag_name.as_str()),
+            Some(true),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let cfg = state.config.read().await.clone();
+    if !cfg.auto_upgrade_enabled || cfg.release_tag.trim() != "latest" {
+        record_auto_upgrade_status(
+            state,
+            "skipped",
+            "automatic upgrade was disabled or retargeted while waiting for idle traffic",
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    let candidate = prepare_upgrade_candidate(&cfg).await?;
+    if !candidate.update_available {
+        record_auto_upgrade_status(
+            state,
+            "no_update",
+            "selected release already matches current server binary after idle wait",
+            Some(candidate.asset.tag_name.as_str()),
+            Some(false),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let response = install_upgrade_candidate(
+        state,
+        &cfg,
+        candidate,
+        "auto_upgrade_installed",
+        "auto_restart_requested",
+    )
+    .await?;
+    record_auto_upgrade_status(
+        state,
+        "installed",
+        &response.message,
+        response.resolved_tag.as_deref(),
+        Some(true),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_auto_upgrade_idle(state: &AppState) -> bool {
+    loop {
+        let cfg = state.config.read().await.clone();
+        if !cfg.auto_upgrade_enabled || cfg.release_tag.trim() != "latest" {
+            return false;
+        }
+        if state.proxy_idle_for(AUTO_UPGRADE_IDLE_WINDOW).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 pub async fn upgrade_ws(
@@ -346,16 +453,204 @@ fn upgrade_event_json(level: &str, message: &str) -> String {
     .to_string()
 }
 
+async fn prepare_upgrade_candidate(cfg: &ServerConfig) -> Result<UpgradeCandidate> {
+    let asset = resolve_release_asset(cfg).await?;
+    let expected_checksum = fetch_expected_checksum(&asset).await?;
+    let current_exe = std::env::current_exe().map_err(AppError::internal)?;
+    let backup_path = backup_path(&current_exe);
+    let current_checksum = sha256_file(&current_exe)?;
+    let update_available = update_available(
+        current_version().as_str(),
+        &asset.tag_name,
+        &current_checksum,
+        &expected_checksum,
+    );
+    Ok(UpgradeCandidate {
+        asset,
+        expected_checksum,
+        current_exe,
+        backup_path,
+        update_available,
+    })
+}
+
+async fn install_upgrade_candidate(
+    state: &AppState,
+    cfg: &ServerConfig,
+    candidate: UpgradeCandidate,
+    install_event: &'static str,
+    restart_event: &'static str,
+) -> Result<UpgradeResponse> {
+    let tmp_path = std::env::temp_dir().join(&candidate.asset.asset_name);
+    emit_upgrade_event(state, "downloading", "downloading release asset");
+    download_asset(&candidate.asset.download_url, &tmp_path).await?;
+    emit_upgrade_event(state, "verifying", "verifying downloaded binary");
+    verify_file_sha256(&tmp_path, &candidate.expected_checksum)?;
+    make_executable(&tmp_path)?;
+    verify_binary(&tmp_path)?;
+    emit_upgrade_event(state, "replacing", "replacing current binary");
+    replace_binary(&tmp_path, &candidate.current_exe, &candidate.backup_path)?;
+    add_audit_event(
+        state,
+        install_event,
+        Some(&format!(
+            "{} from {}",
+            candidate.asset.asset_name, candidate.asset.tag_name
+        )),
+    )
+    .await?;
+    emit_upgrade_event(state, "restarting", "requesting service restart");
+    let restart = request_restart(cfg.systemd_unit.as_deref())?;
+    add_audit_event(state, restart_event, restart.method).await?;
+    emit_upgrade_event(state, "complete", &restart.message);
+    Ok(UpgradeResponse {
+        started: true,
+        message: format!(
+            "installed {}; {}",
+            candidate.asset.asset_name, restart.message
+        ),
+        current_version: current_version(),
+        resolved_tag: Some(candidate.asset.tag_name),
+        update_available: true,
+        asset_name: Some(candidate.asset.asset_name),
+        backup_path: Some(candidate.backup_path.display().to_string()),
+        restart_method: restart.method.map(ToString::to_string),
+        checksum_sha256: Some(candidate.expected_checksum),
+    })
+}
+
+fn update_available(
+    current_version: &str,
+    release_tag: &str,
+    current_checksum: &str,
+    release_checksum: &str,
+) -> bool {
+    match compare_versions(release_tag, current_version) {
+        Some(VersionOrdering::Greater) => true,
+        Some(VersionOrdering::Equal) | Some(VersionOrdering::Less) => false,
+        None => !current_checksum.eq_ignore_ascii_case(release_checksum),
+    }
+}
+
+fn compare_versions(left: &str, right: &str) -> Option<VersionOrdering> {
+    let left = parse_version_numbers(left)?;
+    let right = parse_version_numbers(right)?;
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_value = left.get(index).copied().unwrap_or_default();
+        let right_value = right.get(index).copied().unwrap_or_default();
+        match left_value.cmp(&right_value) {
+            VersionOrdering::Equal => {}
+            ordering => return Some(ordering),
+        }
+    }
+    Some(VersionOrdering::Equal)
+}
+
+fn parse_version_numbers(value: &str) -> Option<Vec<u64>> {
+    let core = value
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+    if core.is_empty() {
+        return None;
+    }
+    core.split('.')
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                None
+            } else {
+                part.parse::<u64>().ok()
+            }
+        })
+        .collect()
+}
+
+fn current_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn effective_release_repo(cfg: &ServerConfig) -> String {
+    let repo = cfg.release_repo.trim();
+    if repo.is_empty() {
+        DEFAULT_RELEASE_REPO.to_string()
+    } else {
+        repo.to_string()
+    }
+}
+
+async fn upgrade_setting(state: &AppState, key: &str) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT value FROM settings WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::internal)?;
+    Ok(row.map(|row| row.get::<String, _>("value")))
+}
+
+async fn record_auto_upgrade_status(
+    state: &AppState,
+    result: &str,
+    message: &str,
+    latest_tag: Option<&str>,
+    update_available: Option<bool>,
+) -> Result<()> {
+    set_upgrade_setting_current_timestamp(state, "auto_upgrade_last_checked_at").await?;
+    set_upgrade_setting(state, "auto_upgrade_last_result", result).await?;
+    set_upgrade_setting(state, "auto_upgrade_last_message", message).await?;
+    if let Some(tag) = latest_tag {
+        set_upgrade_setting(state, "auto_upgrade_latest_tag", tag).await?;
+    }
+    if let Some(available) = update_available {
+        set_upgrade_setting(
+            state,
+            "auto_upgrade_update_available",
+            if available { "true" } else { "false" },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn set_upgrade_setting(state: &AppState, key: &str, value: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO settings (key, value, category, requires_restart) VALUES (?1, ?2, 'upgrade', FALSE) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::internal)?;
+    Ok(())
+}
+
+async fn set_upgrade_setting_current_timestamp(state: &AppState, key: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO settings (key, value, category, requires_restart) VALUES (?1, CURRENT_TIMESTAMP, 'upgrade', FALSE) \
+         ON CONFLICT(key) DO UPDATE SET value = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(key)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::internal)?;
+    Ok(())
+}
+
 async fn resolve_release_asset(cfg: &ServerConfig) -> Result<ReleaseAsset> {
+    let release_repo = effective_release_repo(cfg);
     let release_url = if cfg.release_tag == "latest" {
         format!(
             "https://api.github.com/repos/{}/releases/latest",
-            cfg.release_repo
+            release_repo
         )
     } else {
         format!(
             "https://api.github.com/repos/{}/releases/tags/{}",
-            cfg.release_repo, cfg.release_tag
+            release_repo, cfg.release_tag
         )
     };
     let client = reqwest::Client::builder()
@@ -468,8 +763,7 @@ async fn download_asset(url: &str, path: &Path) -> Result<()> {
 }
 
 fn verify_file_sha256(path: &Path, expected: &str) -> Result<()> {
-    let bytes = fs::read(path).map_err(AppError::internal)?;
-    let actual = sha256_hex(&bytes);
+    let actual = sha256_file(path)?;
     if actual.eq_ignore_ascii_case(expected) {
         Ok(())
     } else {
@@ -479,6 +773,11 @@ fn verify_file_sha256(path: &Path, expected: &str) -> Result<()> {
             "downloaded binary SHA256 did not match the release checksum",
         ))
     }
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).map_err(AppError::internal)?;
+    Ok(sha256_hex(&bytes))
 }
 
 fn parse_sha256_checksum(text: &str, asset_name: &str) -> Option<String> {
@@ -790,34 +1089,6 @@ fn schedule_exec_restart() -> Result<()> {
     ))
 }
 
-fn is_writable_file(path: &Path) -> bool {
-    fs::OpenOptions::new().write(true).open(path).is_ok()
-}
-
-fn is_writable_dir(path: &Path) -> bool {
-    let probe = path.join(format!(".http-tunnel-write-test-{}", std::process::id()));
-    match fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn systemd_unit_exists(unit: &str) -> bool {
-    Command::new("systemctl")
-        .arg("status")
-        .arg(unit)
-        .arg("--no-pager")
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
 fn server_asset_name() -> String {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
@@ -918,13 +1189,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&backup).unwrap(), "old");
     }
 
-    #[test]
-    fn writable_dir_probe_reports_existing_temp_dir() {
-        let dir = temp_test_dir("writable-dir");
-        assert!(is_writable_dir(&dir));
-        assert!(!is_writable_dir(&dir.join("missing")));
-    }
-
     #[cfg(unix)]
     #[test]
     fn command_availability_requires_successful_version_probe() {
@@ -955,6 +1219,33 @@ mod tests {
         let checks = restart_method_checks(None);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].method, "exec");
+    }
+
+    #[test]
+    fn compares_semver_like_release_tags() {
+        assert_eq!(
+            compare_versions("v0.2.0", "0.1.9"),
+            Some(VersionOrdering::Greater)
+        );
+        assert_eq!(
+            compare_versions("0.1.0", "v0.1.0"),
+            Some(VersionOrdering::Equal)
+        );
+        assert_eq!(
+            compare_versions("0.1.0", "0.1.1"),
+            Some(VersionOrdering::Less)
+        );
+        assert_eq!(compare_versions("latest", "0.1.0"), None);
+    }
+
+    #[test]
+    fn update_available_prefers_newer_versions_then_checksum_fallback() {
+        let old_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(update_available("0.1.0", "v0.2.0", old_hash, old_hash));
+        assert!(!update_available("0.2.0", "v0.2.0", old_hash, new_hash));
+        assert!(update_available("0.1.0", "latest", old_hash, new_hash));
+        assert!(!update_available("0.1.0", "latest", old_hash, old_hash));
     }
 
     fn temp_test_dir(name: &str) -> PathBuf {

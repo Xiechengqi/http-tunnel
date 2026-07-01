@@ -4,12 +4,15 @@ Build and run:
 
 ```bash
 ./build.sh
-./target/release/http-tunnel-server serve
+./target/release/http-tunnel-server
 ```
 
 The supported runtime artifact is the binary itself. This project does not publish or document a container runtime path.
+The dashboard is built as a Next.js static export and embedded into the server binary during the binary build; no Node.js runtime is required on the server host.
 
 Without `--config`, the server uses `$HOME/.http-tunnel/server.toml`, `sqlite://$HOME/.http-tunnel/http-tunnel.sqlite3`, and `$HOME/.http-tunnel` for local data. Pass `--config` or set `HTTP_TUNNEL_CONFIG` only when a deployment needs a different location.
+
+The public dashboard source map is optional and offline-only. Put `GeoLite2-City.mmdb` in the data directory, for example `$HOME/.http-tunnel/GeoLite2-City.mmdb`; without it, the tunnel table still works and the map shows no located points.
 
 The server owns setup, admin, public API, tunnel WebSocket, and subdomain proxy traffic on one HTTP listener.
 
@@ -22,7 +25,7 @@ After=network-online.target
 
 [Service]
 Environment=HOME=/opt/http-tunnel
-ExecStart=/opt/http-tunnel/http-tunnel-server serve
+ExecStart=/opt/http-tunnel/http-tunnel-server
 WorkingDirectory=/opt/http-tunnel
 Restart=always
 RestartSec=3
@@ -35,11 +38,12 @@ Set `HTTP_TUNNEL_SYSTEMD_UNIT=http-tunnel.service` or save `systemd_unit = "http
 
 Upgrade requirements:
 
-- `release_repo` points to `owner/repo`; leaving it empty disables admin upgrade checks and binary replacement.
-- `release_tag` is `latest` or a concrete tag.
+- `release_repo` points to `owner/repo`; if omitted, the official `Xiechengqi/http-tunnel` repository is used.
+- `release_tag` is `latest` or a concrete tag. Automatic upgrades only track `latest`.
+- `auto_upgrade_enabled` defaults to `false`. When enabled, it controls the background 5-minute update check. Automatic replacement waits until tunnel proxy traffic has been idle for 10 seconds.
 - Release asset name matches `http-tunnel-server-linux-amd64` or `http-tunnel-server-linux-arm64`.
 - A SHA256 checksum asset is published as `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt`.
-- Admin upgrade dry-runs and replacements reject missing or unparsable checksums.
+- Admin upgrade replacements reject missing or unparsable checksums.
 - The downloaded binary must pass `--help` before replacement.
 - The old binary is backed up as `<current_exe>.bak`.
 

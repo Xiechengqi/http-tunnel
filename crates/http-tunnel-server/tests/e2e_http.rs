@@ -64,26 +64,75 @@ impl Drop for TargetGuard {
 
 #[test]
 fn dashboard_admin_static_has_policy_form_and_no_prompt_editors() {
-    let admin_html = std::fs::read_to_string(workspace_root().join("dashboard/src/admin.html"))
-        .expect("read dashboard admin html");
-    assert!(!admin_html.contains("prompt("));
-    assert!(admin_html.contains("tunnelPolicySection"));
-    assert!(admin_html.contains("saveTunnelPolicy"));
-    assert!(admin_html.contains("requestExport"));
-    assert!(admin_html.contains("requestExportAll"));
-    assert!(admin_html.contains("auditExport"));
-    assert!(admin_html.contains("auditExportAll"));
-    assert!(admin_html.contains("copyDiagnostics"));
-    assert!(admin_html.contains("downloadDiagnostics"));
-    assert!(admin_html.contains("configSchema"));
-    assert!(admin_html.contains("validateConfigClient"));
-    assert!(admin_html.contains("value_type"));
-    assert!(admin_html.contains("allowed_values"));
-    assert!(admin_html.contains("/api/admin/requests/export"));
-    assert!(admin_html.contains("/api/admin/diagnostics"));
-    assert!(admin_html.contains("/api/admin/config/schema"));
-    assert!(admin_html.contains("/api/admin/alerts"));
-    assert!(admin_html.contains("/replay"));
+    let admin_source =
+        std::fs::read_to_string(workspace_root().join("dashboard/app/admin/admin-console.tsx"))
+            .expect("read dashboard admin source");
+    assert!(!admin_source.contains("prompt("));
+    assert!(admin_source.contains("Toggle inspector"));
+    assert!(admin_source.contains("Rotate tunnel token"));
+    assert!(admin_source.contains("Download backup"));
+    assert!(admin_source.contains("Diagnostics"));
+    assert!(admin_source.contains("ConfigFieldSchema"));
+    assert!(admin_source.contains("allowed_values"));
+    assert!(admin_source.contains("/api/admin/requests/"));
+    assert!(admin_source.contains("/api/admin/diagnostics"));
+    assert!(admin_source.contains("/api/admin/config/schema"));
+    assert!(admin_source.contains("/api/admin/alerts"));
+    assert!(admin_source.contains("/replay"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_dashboard_lists_tunnels_without_admin_fields() {
+    let workspace = workspace_root();
+    let server_port = free_port();
+    let test_dir = unique_test_dir("public-dashboard");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let server = TestServer::start(&workspace, &test_dir, server_port).await;
+    server.setup().await;
+    let http = reqwest::Client::new();
+    let _ = create_tunnel(&http, server_port, "publicdash").await;
+
+    let response: Value = http
+        .get(format!("http://127.0.0.1:{server_port}/api/v1/dashboard"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+    let data = &response["data"];
+    assert_eq!(data["server_url"], "http://127.0.0.1");
+    let tunnel = data["tunnels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tunnel| tunnel["subdomain"] == "publicdash")
+        .expect("public dashboard should list created tunnel");
+    assert_eq!(tunnel["url"], "http://publicdash.127.0.0.1");
+    assert!(tunnel["source"]["label"].as_str().is_some());
+
+    let raw = serde_json::to_string(data).unwrap();
+    for forbidden in [
+        "access_policy",
+        "access_token",
+        "access_username",
+        "allowed_methods",
+        "blocked_path_prefixes",
+        "inspector",
+        "rate_limit",
+        "client_ip",
+        "remote_ip",
+        "token_hash",
+        "database",
+        "protocol_version",
+    ] {
+        assert!(
+            !raw.contains(forbidden),
+            "leaked public dashboard field {forbidden}"
+        );
+    }
 }
 
 #[test]

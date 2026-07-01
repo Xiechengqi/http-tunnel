@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub require_random_subdomain: bool,
     pub release_repo: String,
     pub release_tag: String,
+    pub auto_upgrade_enabled: bool,
     pub systemd_unit: Option<String>,
 }
 
@@ -105,8 +106,9 @@ impl Default for ServerConfig {
                 .collect(),
             allow_custom_subdomain: true,
             require_random_subdomain: false,
-            release_repo: String::new(),
+            release_repo: "Xiechengqi/http-tunnel".to_string(),
             release_tag: "latest".to_string(),
+            auto_upgrade_enabled: false,
             systemd_unit: None,
         }
     }
@@ -306,6 +308,9 @@ impl ServerConfig {
         }
         if let Ok(v) = env::var("HTTP_TUNNEL_RELEASE_TAG") {
             self.release_tag = v;
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED") {
+            self.auto_upgrade_enabled = parse_bool("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED", &v)?;
         }
         if let Ok(v) = env::var("HTTP_TUNNEL_SYSTEMD_UNIT") {
             self.systemd_unit = Some(v);
