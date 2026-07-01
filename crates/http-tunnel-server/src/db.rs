@@ -39,6 +39,15 @@ async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         sqlx::query(INIT_SQL).execute(pool).await?;
         record_schema_version(pool, INIT_SCHEMA_VERSION).await?;
     }
+    ensure_column(pool, "sessions", "client_reported_ip", "TEXT").await?;
+    ensure_column(
+        pool,
+        "sessions",
+        "client_reported_ip_updated_at",
+        "TIMESTAMP",
+    )
+    .await?;
+    ensure_column(pool, "sessions", "client_country_source", "TEXT").await?;
     ensure_column(pool, "sessions", "client_country_code", "TEXT").await?;
     ensure_column(pool, "sessions", "client_country", "TEXT").await?;
     Ok(())

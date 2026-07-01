@@ -69,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
                     url,
                     create_token,
                     persist_token,
+                    public_ip_lookup_urls,
+                    public_ip_refresh_seconds,
                 },
         } => {
             let mut cfg = load_config_file()?;
@@ -104,6 +106,12 @@ async fn main() -> anyhow::Result<()> {
                 if !persist_token {
                     clear_stored_tunnel(&mut cfg);
                 }
+            }
+            if !public_ip_lookup_urls.is_empty() {
+                cfg.public_ip_lookup_urls = Some(public_ip_lookup_urls);
+            }
+            if let Some(public_ip_refresh_seconds) = public_ip_refresh_seconds {
+                cfg.public_ip_refresh_seconds = Some(public_ip_refresh_seconds);
             }
             save_config_file(&cfg)?;
             println!("updated config: {}", default_config_path().display());

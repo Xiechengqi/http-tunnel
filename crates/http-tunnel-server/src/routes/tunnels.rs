@@ -26,13 +26,14 @@ use hmac::{Hmac, Mac};
 use http_tunnel_common::{
     api::ApiResponse,
     ids::{generate_event_id, generate_session_id, generate_tunnel_id},
+    ip::parse_public_ip,
     password::hash_password,
     subdomain::validate_subdomain,
     token::{generate_token, hash_token, verify_token},
 };
 use http_tunnel_protocol::{
     decode_frame, encode_frame,
-    types::{decode_payload, encode_payload, Hello, HelloAck},
+    types::{decode_payload, encode_payload, ClientSourceReport, Hello, HelloAck},
     version::VERSION as PROTOCOL_VERSION,
     Frame, FrameType,
 };
@@ -51,6 +52,7 @@ const DEFAULT_TUNNEL_LIMIT: i64 = 200;
 const DEFAULT_LOG_LIMIT: i64 = 100;
 const MAX_PAGE_LIMIT: i64 = 500;
 const MAX_EXPORT_LIMIT: i64 = 10_000;
+const CLIENT_SOURCE_UPDATE_CAPABILITY: &str = "client_source_update";
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTunnelRequest {
@@ -122,8 +124,16 @@ pub struct RotateTokenResponse {
 #[derive(Debug, Clone)]
 struct ClientSource {
     ip: String,
+    header_country_code: Option<String>,
+    remote_country: Option<geoip::CountryLocation>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedClientSource {
     country_code: Option<String>,
     country: Option<String>,
+    country_source: Option<&'static str>,
+    reported_ip: Option<String>,
 }
 
 fn client_source(
@@ -137,25 +147,65 @@ fn client_source(
         cfg.trust_proxy_headers,
         &cfg.trusted_proxy_cidrs,
     );
-    let header_country = client_country_code_from_headers(
+    let header_country_code = client_country_code_from_headers(
         headers,
         remote_addr,
         cfg.trust_proxy_headers,
         &cfg.trusted_proxy_cidrs,
     );
-    let geo_country = ip
+    let remote_country = ip
         .parse()
         .ok()
         .and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
 
     ClientSource {
         ip,
-        country_code: header_country.or_else(|| {
-            geo_country
-                .as_ref()
-                .map(|country| country.country_code.clone())
-        }),
-        country: geo_country.and_then(|country| country.country),
+        header_country_code,
+        remote_country,
+    }
+}
+
+fn resolve_client_source(
+    cfg: &http_tunnel_common::ServerConfig,
+    source: &ClientSource,
+    report: Option<&ClientSourceReport>,
+) -> ResolvedClientSource {
+    let reported_ip = report.and_then(|report| parse_public_ip(&report.public_ip));
+    let reported_country = reported_ip.and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
+    let reported_ip = reported_ip.map(|ip| ip.to_string());
+
+    if let Some(country_code) = source.header_country_code.clone() {
+        return ResolvedClientSource {
+            country_code: Some(country_code),
+            country: None,
+            country_source: Some("cf_header"),
+            reported_ip,
+        };
+    }
+
+    if let Some(country) = reported_country {
+        return ResolvedClientSource {
+            country_code: Some(country.country_code),
+            country: country.country,
+            country_source: Some("reported_ip"),
+            reported_ip,
+        };
+    }
+
+    if let Some(country) = source.remote_country.clone() {
+        return ResolvedClientSource {
+            country_code: Some(country.country_code),
+            country: country.country,
+            country_source: Some("remote_geoip"),
+            reported_ip,
+        };
+    }
+
+    ResolvedClientSource {
+        country_code: None,
+        country: None,
+        country_source: None,
+        reported_ip,
     }
 }
 
@@ -545,6 +595,17 @@ async fn handle_socket(
                                         .await;
                                     continue;
                                 }
+                                FrameType::ClientSourceUpdate if registered => {
+                                    mark_session_seen(&state, &session_id, &last_seen).await;
+                                    handle_client_source_update(
+                                        &state,
+                                        &session_id,
+                                        &source,
+                                        &frame.payload,
+                                    )
+                                    .await;
+                                    continue;
+                                }
                                 _ if !registered => {
                                     disconnect_reason = "hello_required";
                                     let _ = frame_tx
@@ -695,6 +756,7 @@ async fn handle_client_hello(
     };
     let capabilities = serde_json::to_string(&hello.capabilities).unwrap_or_else(|_| "[]".into());
     let cfg = state.config.read().await.clone();
+    let resolved_source = resolve_client_source(&cfg, source, hello.client_source.as_ref());
     let session_pool_policy = effective_session_pool_policy(&cfg);
     let registration = state
         .register_session(subdomain, session.clone(), session_pool_policy)
@@ -745,15 +807,23 @@ async fn handle_client_hello(
         .await;
     }
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO sessions (id, tunnel_id, remote_addr, client_country_code, client_country) VALUES (?1, ?2, ?3, ?4, ?5); \
-         UPDATE sessions SET client_version = ?6, client_capabilities = ?7, last_seen_at = CURRENT_TIMESTAMP, remote_addr = ?3, client_country_code = ?4, client_country = ?5 WHERE id = ?1; \
-         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?8) WHERE id = ?2",
+        "INSERT OR IGNORE INTO sessions \
+            (id, tunnel_id, remote_addr, client_reported_ip, client_reported_ip_updated_at, client_country_source, client_country_code, client_country) \
+         VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, ?5, ?6, ?7); \
+         UPDATE sessions SET client_version = ?8, client_capabilities = ?9, last_seen_at = CURRENT_TIMESTAMP, remote_addr = ?3, \
+             client_reported_ip = ?4, \
+             client_reported_ip_updated_at = CASE WHEN ?4 IS NULL THEN client_reported_ip_updated_at ELSE CURRENT_TIMESTAMP END, \
+             client_country_source = ?5, client_country_code = ?6, client_country = ?7 \
+         WHERE id = ?1; \
+         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?10) WHERE id = ?2",
     )
     .bind(&session.session_id)
     .bind(&session.tunnel_id)
     .bind(&source.ip)
-    .bind(source.country_code.as_deref())
-    .bind(source.country.as_deref())
+    .bind(resolved_source.reported_ip.as_deref())
+    .bind(resolved_source.country_source)
+    .bind(resolved_source.country_code.as_deref())
+    .bind(resolved_source.country.as_deref())
     .bind(hello.client_version.as_deref())
     .bind(capabilities)
     .bind(format!("+{} seconds", cfg.tunnel_ttl_seconds))
@@ -795,6 +865,43 @@ async fn handle_client_hello(
     HelloResult::Accepted
 }
 
+async fn handle_client_source_update(
+    state: &AppState,
+    session_id: &str,
+    source: &ClientSource,
+    payload: &[u8],
+) {
+    let report = match decode_payload::<ClientSourceReport>(payload) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::debug!(%error, "invalid client source update");
+            return;
+        }
+    };
+    let cfg = state.config.read().await.clone();
+    let resolved_source = resolve_client_source(&cfg, source, Some(&report));
+    let result = sqlx::query(
+        "UPDATE sessions SET \
+             client_reported_ip = ?1, \
+             client_reported_ip_updated_at = CASE WHEN ?1 IS NULL THEN client_reported_ip_updated_at ELSE CURRENT_TIMESTAMP END, \
+             client_country_source = ?2, \
+             client_country_code = ?3, \
+             client_country = ?4, \
+             last_seen_at = CURRENT_TIMESTAMP \
+         WHERE id = ?5",
+    )
+    .bind(resolved_source.reported_ip.as_deref())
+    .bind(resolved_source.country_source)
+    .bind(resolved_source.country_code.as_deref())
+    .bind(resolved_source.country.as_deref())
+    .bind(session_id)
+    .execute(&state.pool)
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to update client source");
+    }
+}
+
 async fn send_hello_ack(
     frame_tx: &mpsc::Sender<Frame>,
     accepted: bool,
@@ -809,6 +916,11 @@ async fn send_hello_ack(
                 accepted,
                 message: message.map(ToString::to_string),
                 reconnect_token,
+                capabilities: if accepted {
+                    vec![CLIENT_SOURCE_UPDATE_CAPABILITY.to_string()]
+                } else {
+                    Vec::new()
+                },
             })
             .unwrap_or_default(),
         ))
@@ -2257,4 +2369,76 @@ async fn expire_inactive_tunnels(pool: &SqlitePool) -> Result<()> {
     .await
     .map_err(AppError::internal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cf_country_header_wins_over_other_sources() {
+        let cfg = http_tunnel_common::ServerConfig::default();
+        let source = ClientSource {
+            ip: "198.51.100.10".to_string(),
+            header_country_code: Some("US".to_string()),
+            remote_country: Some(geoip::CountryLocation {
+                country_code: "DE".to_string(),
+                country: Some("Germany".to_string()),
+            }),
+        };
+        let report = ClientSourceReport {
+            public_ip: "127.0.0.1".to_string(),
+            checked_at_unix_seconds: Some(1),
+        };
+
+        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+
+        assert_eq!(resolved.country_code.as_deref(), Some("US"));
+        assert_eq!(resolved.country_source, Some("cf_header"));
+        assert_eq!(resolved.reported_ip, None);
+    }
+
+    #[test]
+    fn remote_geoip_is_fallback_when_report_is_not_public() {
+        let cfg = http_tunnel_common::ServerConfig::default();
+        let source = ClientSource {
+            ip: "198.51.100.10".to_string(),
+            header_country_code: None,
+            remote_country: Some(geoip::CountryLocation {
+                country_code: "JP".to_string(),
+                country: Some("Japan".to_string()),
+            }),
+        };
+        let report = ClientSourceReport {
+            public_ip: "10.0.0.1".to_string(),
+            checked_at_unix_seconds: Some(1),
+        };
+
+        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+
+        assert_eq!(resolved.country_code.as_deref(), Some("JP"));
+        assert_eq!(resolved.country.as_deref(), Some("Japan"));
+        assert_eq!(resolved.country_source, Some("remote_geoip"));
+        assert_eq!(resolved.reported_ip, None);
+    }
+
+    #[test]
+    fn public_reported_ip_is_stored_even_without_geoip_match() {
+        let cfg = http_tunnel_common::ServerConfig::default();
+        let source = ClientSource {
+            ip: "198.51.100.10".to_string(),
+            header_country_code: None,
+            remote_country: None,
+        };
+        let report = ClientSourceReport {
+            public_ip: "8.8.8.8".to_string(),
+            checked_at_unix_seconds: Some(1),
+        };
+
+        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+
+        assert_eq!(resolved.country_code, None);
+        assert_eq!(resolved.country_source, None);
+        assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
+    }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -262,6 +262,7 @@ function TunnelSourceMap({
   totalClients: number;
   unknownClients: number;
 }) {
+  const [mapFrameRef, mapFrameWidth] = useElementWidth<HTMLDivElement>();
   const data = countries
     .filter((country) => country.country_code)
     .map((country) => ({
@@ -270,20 +271,22 @@ function TunnelSourceMap({
     })) as DataItem<number>[];
   const countryMeta = new Map(countries.map((country) => [country.country_code.toUpperCase(), country]));
   const maxClients = countries.reduce((max, country) => Math.max(max, country.client_count), 0);
+  const mapSize = Math.max(640, Math.ceil(mapFrameWidth || 960));
 
   return (
-    <div className="relative min-h-[320px] overflow-hidden border-t border-border bg-sky-50 px-3 py-4 md:min-h-[380px] dark:bg-[#07111f]">
-      <div className="mx-auto max-w-5xl">
+    <div className="relative h-[clamp(320px,48vw,620px)] overflow-hidden border-t border-border bg-sky-50 dark:bg-[#07111f]">
+      <div ref={mapFrameRef} className="absolute inset-x-0 bottom-9 top-0 flex -translate-y-3 items-center justify-center overflow-hidden px-2 md:bottom-10">
         <WorldMap
           data={data}
           color="#0A94F2"
-          size="responsive"
+          size={mapSize}
           frame={false}
           backgroundColor="transparent"
           borderColor="rgba(14, 116, 144, 0.22)"
           tooltipBgColor="hsl(var(--popover))"
           tooltipTextColor="hsl(var(--popover-foreground))"
           richInteraction
+          containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
           tooltipTextFunction={(context) => countryTooltip(context, countryMeta)}
           styleFunction={(context) => countryStyle(context, maxClients)}
         />
@@ -304,6 +307,44 @@ function TunnelSourceMap({
       ) : null}
     </div>
   );
+}
+
+function useElementWidth<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+
+    let frame = 0;
+    const update = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        setWidth(Math.round(node.getBoundingClientRect().width));
+      });
+    };
+
+    update();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => {
+        window.cancelAnimationFrame(frame);
+        window.removeEventListener("resize", update);
+      };
+    }
+
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
+
+  return [ref, width] as const;
 }
 
 function countryTooltip(context: CountryContext<number>, countryMeta: Map<string, PublicTunnelCountrySource>) {

@@ -27,6 +27,8 @@ trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128", "... Cloudflare ranges ..."]
 
 Set `HTTP_TUNNEL_TRUSTED_PROXY_CIDRS` to a comma-separated CIDR list when the server is behind a reverse proxy. If the proxy is not trusted, rate limiting uses the direct peer IP.
 
+Client-reported public IPs are accepted only after public-address validation and are used for dashboard country display only. They are not used for authentication, rate limiting, audit identity, or proxy trust decisions.
+
 Tunnel tokens are stored hashed on the server. The client can persist tunnel credentials in:
 
 ```text

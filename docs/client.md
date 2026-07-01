@@ -19,6 +19,12 @@ server = "https://example.com"
 subdomain = "demo"
 target = "http://127.0.0.1:3000"
 persist_token = true
+public_ip_lookup_urls = [
+  "https://api64.ipify.org?format=json",
+  "https://api.ipify.org?format=json",
+  "http://3.0.3.0",
+]
+public_ip_refresh_seconds = 3600
 # optional when public tunnel creation is disabled:
 # create_token = "..."
 # written automatically when persist_token = true:
@@ -41,6 +47,7 @@ http-tunnel-client config set --server https://example.com --target http://127.0
 http-tunnel-client config set --tunnel-id tun_123 --token <token> --url https://demo.example.com
 http-tunnel-client config set --create-token <admin-generated-create-token>
 http-tunnel-client config set --persist-token false
+http-tunnel-client config set --public-ip-lookup-url https://api64.ipify.org?format=json --public-ip-refresh-seconds 3600
 http-tunnel-client config clear-token
 ```
 
@@ -95,7 +102,9 @@ http-tunnel-client release --server https://example.com --tunnel-id tun_123 --to
 
 The client creates a tunnel, connects over WebSocket, forwards HTTP/WebSocket traffic to the local target, and reconnects with backoff after disconnects.
 
-On connect, the client sends a protocol `Hello` containing the client version, protocol version, capabilities (`http`, `websocket`, `heartbeat`), and any in-memory reconnect token from the previous connection. The server accepts legacy clients that do not send these fields, but disconnects clients that explicitly report an unsupported protocol version.
+On connect, the client sends a protocol `Hello` containing the client version, protocol version, capabilities (`http`, `websocket`, `heartbeat`), any in-memory reconnect token from the previous connection, and a best-effort public IP report for dashboard country display. The server accepts legacy clients that do not send these fields, but disconnects clients that explicitly report an unsupported protocol version.
+
+The public IP report is not used for authentication, rate limits, or audit identity. The client reads only a public IP from the configured lookup URLs, rejects private/reserved IPs locally, sends the IP at registration, and refreshes it every `public_ip_refresh_seconds` seconds while connected. The server resolves the country locally from `GeoIP-Country.mmdb`; if the server has no compatible country database, the dashboard will still show `Unknown country`.
 
 The client responds to protocol `Ping` frames with `Pong`; this lets the server detect half-open or stale sessions.
 

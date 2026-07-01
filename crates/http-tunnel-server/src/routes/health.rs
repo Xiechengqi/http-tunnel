@@ -101,7 +101,7 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
     let database_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     let runtime = runtime_tunnel_metrics(&state).await;
     let tunnels = public_tunnels(&state, &cfg, &runtime).await;
-    let country_sources = public_country_sources(&state, &runtime).await;
+    let country_sources = public_country_sources(&state, &cfg, &runtime).await;
     let stats = dashboard_stats(&tunnels, &country_sources);
 
     Json(ApiResponse::ok(DashboardSummary {
@@ -186,7 +186,8 @@ async fn public_tunnels(
 ) -> Vec<PublicTunnel> {
     let rows = sqlx::query(
         "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.client_ip, \
-                ls.remote_addr AS latest_remote_addr, ls.client_country_code AS latest_country_code, \
+                ls.remote_addr AS latest_remote_addr, ls.client_reported_ip AS latest_reported_ip, \
+                ls.client_country_code AS latest_country_code, \
                 ls.client_country AS latest_country, ls.last_seen_at AS latest_seen_at, \
                 COALESCE(req.request_count, 0) AS request_count, \
                 COALESCE(req.error_count, 0) AS error_count, \
@@ -229,6 +230,10 @@ async fn public_tunnels(
                 .unwrap_or_default();
             let connected = active_sessions > 0;
             let source_ip = source_ip(
+                row.try_get::<Option<String>, _>("latest_reported_ip")
+                    .ok()
+                    .flatten()
+                    .as_deref(),
                 row.try_get::<Option<String>, _>("latest_remote_addr")
                     .ok()
                     .flatten()
@@ -285,6 +290,7 @@ async fn public_tunnels(
 
 async fn public_country_sources(
     state: &AppState,
+    cfg: &http_tunnel_common::ServerConfig,
     runtime: &HashMap<String, RuntimeTunnelMetrics>,
 ) -> Vec<PublicTunnelCountrySource> {
     let session_ids = runtime
@@ -296,42 +302,77 @@ async fn public_country_sources(
     }
 
     let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT client_country_code, MAX(client_country) AS client_country, COUNT(*) AS client_count, COUNT(DISTINCT tunnel_id) AS tunnel_count \
+        "SELECT tunnel_id, client_country_code, client_country, client_reported_ip \
          FROM sessions WHERE id IN (",
     );
     let mut separated = builder.separated(", ");
     for session_id in &session_ids {
         separated.push_bind(session_id);
     }
-    separated.push_unseparated(
-        ") AND client_country_code IS NOT NULL AND client_country_code != '' \
-         GROUP BY client_country_code ORDER BY client_count DESC, client_country_code ASC",
-    );
+    separated.push_unseparated(")");
 
-    builder
+    let mut by_country =
+        HashMap::<String, (Option<String>, usize, std::collections::HashSet<String>)>::new();
+    for row in builder
         .build()
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default()
+    {
+        let row_country_code = row
+            .try_get::<Option<String>, _>("client_country_code")
+            .ok()
+            .flatten()
+            .and_then(|code| geoip::normalize_country_code(Some(&code)));
+        let row_country = row
+            .try_get::<Option<String>, _>("client_country")
+            .ok()
+            .flatten()
+            .filter(|value| !value.trim().is_empty());
+        let reported_country = row
+            .try_get::<Option<String>, _>("client_reported_ip")
+            .ok()
+            .flatten()
+            .as_deref()
+            .and_then(parse_ip)
+            .and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
+        let Some(country_code) = row_country_code.or_else(|| {
+            reported_country
+                .as_ref()
+                .map(|country| country.country_code.clone())
+        }) else {
+            continue;
+        };
+        let country = row_country.or_else(|| reported_country.and_then(|country| country.country));
+        let tunnel_id = row.get::<String, _>("tunnel_id");
+        let entry = by_country
+            .entry(country_code)
+            .or_insert_with(|| (country.clone(), 0, std::collections::HashSet::new()));
+        if entry.0.is_none() {
+            entry.0 = country;
+        }
+        entry.1 += 1;
+        entry.2.insert(tunnel_id);
+    }
+
+    let mut sources = by_country
         .into_iter()
-        .filter_map(|row| {
-            let country_code = row
-                .try_get::<Option<String>, _>("client_country_code")
-                .ok()
-                .flatten()
-                .and_then(|code| geoip::normalize_country_code(Some(&code)))?;
-            Some(PublicTunnelCountrySource {
+        .map(
+            |(country_code, (country, client_count, tunnel_ids))| PublicTunnelCountrySource {
                 country_code,
-                country: row
-                    .try_get::<Option<String>, _>("client_country")
-                    .ok()
-                    .flatten()
-                    .filter(|value| !value.trim().is_empty()),
-                client_count: non_negative_usize(row.get::<i64, _>("client_count")),
-                tunnel_count: non_negative_usize(row.get::<i64, _>("tunnel_count")),
-            })
-        })
-        .collect()
+                country,
+                client_count,
+                tunnel_count: tunnel_ids.len(),
+            },
+        )
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| {
+        right
+            .client_count
+            .cmp(&left.client_count)
+            .then_with(|| left.country_code.cmp(&right.country_code))
+    });
+    sources
 }
 
 fn dashboard_stats(
@@ -364,9 +405,14 @@ fn dashboard_stats(
     stats
 }
 
-fn source_ip(latest_remote_addr: Option<&str>, client_ip: Option<&str>) -> Option<IpAddr> {
-    latest_remote_addr
+fn source_ip(
+    latest_reported_ip: Option<&str>,
+    latest_remote_addr: Option<&str>,
+    client_ip: Option<&str>,
+) -> Option<IpAddr> {
+    latest_reported_ip
         .and_then(parse_ip)
+        .or_else(|| latest_remote_addr.and_then(parse_ip))
         .or_else(|| client_ip.and_then(parse_ip))
 }
 
@@ -414,10 +460,6 @@ fn public_source(
 
 fn non_negative_u64(value: i64) -> u64 {
     u64::try_from(value.max(0)).unwrap_or_default()
-}
-
-fn non_negative_usize(value: i64) -> usize {
-    usize::try_from(value.max(0)).unwrap_or_default()
 }
 
 fn unix_now() -> u64 {

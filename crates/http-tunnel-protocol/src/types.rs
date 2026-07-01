@@ -11,6 +11,8 @@ pub struct Hello {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub reconnect_token: Option<String>,
+    #[serde(default)]
+    pub client_source: Option<ClientSourceReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +21,15 @@ pub struct HelloAck {
     pub message: Option<String>,
     #[serde(default)]
     pub reconnect_token: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientSourceReport {
+    pub public_ip: String,
+    #[serde(default)]
+    pub checked_at_unix_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,5 +126,21 @@ mod tests {
         assert_eq!(hello.protocol_version, None);
         assert!(hello.capabilities.is_empty());
         assert_eq!(hello.reconnect_token, None);
+        assert_eq!(hello.client_source, None);
+    }
+
+    #[test]
+    fn hello_accepts_client_source_report() {
+        let hello: Hello = serde_json::from_str(
+            r#"{"target":"http://127.0.0.1:3000","client_source":{"public_ip":"8.8.8.8","checked_at_unix_seconds":123}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            hello.client_source,
+            Some(ClientSourceReport {
+                public_ip: "8.8.8.8".to_string(),
+                checked_at_unix_seconds: Some(123),
+            })
+        );
     }
 }

@@ -65,7 +65,7 @@ POST /api/admin/restart
 
 `GET /api/v1/ready` returns `200` when setup is complete and the database answers `SELECT 1`. It returns `503` while setup is still required or the database readiness check fails.
 
-`GET /api/v1/dashboard` returns public tunnel data only. It intentionally excludes admin-only configuration such as access policies, tokens, rate limits, inspector settings, full client IPs, audit data, and database/runtime internals. Country data comes from trusted `CF-IPCountry` headers when traffic arrives through Cloudflare, or from `GeoIP-Country.mmdb` in the configured data directory, which defaults to `$HOME/.http-tunnel`.
+`GET /api/v1/dashboard` returns public tunnel data only. It intentionally excludes admin-only configuration such as access policies, tokens, rate limits, inspector settings, full client IPs, audit data, and database/runtime internals. Country data comes from trusted `CF-IPCountry` headers when traffic arrives through Cloudflare, from a client-reported public IP resolved locally with `GeoIP-Country.mmdb`, or from the observed remote address resolved with the same database. The configured data directory defaults to `$HOME/.http-tunnel`.
 
 `GET /metrics` returns Prometheus text format with active session, active stream, tunnel status, request, byte, WebSocket session/message, disconnect reason, reconnect token, stale-session, and audit counters. It is protected by default. Access is allowed when `metrics_public = true`, when the direct peer IP matches `trusted_proxy_cidrs`, when the request is authenticated as admin, or when `Authorization: Bearer <token>` matches the dedicated `metrics_bearer_token_hash`.
 

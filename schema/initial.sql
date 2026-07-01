@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     client_version TEXT,
     client_capabilities TEXT,
     remote_addr TEXT,
+    client_reported_ip TEXT,
+    client_reported_ip_updated_at TIMESTAMP,
+    client_country_source TEXT,
     client_country_code TEXT,
     client_country TEXT
 );

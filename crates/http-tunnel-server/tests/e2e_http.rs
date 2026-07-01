@@ -3703,6 +3703,7 @@ async fn send_tunnel_hello(ws: &mut TestTunnelWs, reconnect_token: Option<String
         protocol_version: Some(PROTOCOL_VERSION),
         capabilities: vec!["http".to_string(), "websocket".to_string()],
         reconnect_token,
+        client_source: None,
     })
     .unwrap();
     ws.send(TungsteniteMessage::Binary(

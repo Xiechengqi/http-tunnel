@@ -12,6 +12,8 @@ pub struct ClientConfig {
     pub url: Option<String>,
     pub create_token: Option<String>,
     pub persist_token: Option<bool>,
+    pub public_ip_lookup_urls: Option<Vec<String>>,
+    pub public_ip_refresh_seconds: Option<u64>,
 }
 
 pub fn init_config_file() -> anyhow::Result<std::path::PathBuf> {
@@ -96,6 +98,8 @@ token = "secret"
 url = "https://demo.example.com"
 create_token = "create-secret"
 persist_token = false
+public_ip_lookup_urls = ["https://api64.ipify.org?format=json"]
+public_ip_refresh_seconds = 3600
 "#,
         )
         .unwrap();
@@ -107,6 +111,11 @@ persist_token = false
         assert_eq!(cfg.url.as_deref(), Some("https://demo.example.com"));
         assert_eq!(cfg.create_token.as_deref(), Some("create-secret"));
         assert_eq!(cfg.persist_token, Some(false));
+        assert_eq!(
+            cfg.public_ip_lookup_urls.as_ref().unwrap(),
+            &vec!["https://api64.ipify.org?format=json".to_string()]
+        );
+        assert_eq!(cfg.public_ip_refresh_seconds, Some(3600));
     }
 
     #[test]

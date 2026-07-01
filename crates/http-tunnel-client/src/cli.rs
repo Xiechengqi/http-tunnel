@@ -111,5 +111,9 @@ pub enum ConfigCommand {
         create_token: Option<String>,
         #[arg(long, value_parser = clap::value_parser!(bool))]
         persist_token: Option<bool>,
+        #[arg(long = "public-ip-lookup-url", value_delimiter = ',')]
+        public_ip_lookup_urls: Vec<String>,
+        #[arg(long)]
+        public_ip_refresh_seconds: Option<u64>,
     },
 }

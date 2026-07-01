@@ -7,10 +7,12 @@ use crate::{
 use anyhow::Context;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use http_tunnel_common::api::ApiResponse;
+use http_tunnel_common::{api::ApiResponse, ip::parse_public_ip};
 use http_tunnel_protocol::{
     decode_frame, encode_frame,
-    types::{decode_payload, encode_payload, Hello, HelloAck, RequestStart, WsOpen},
+    types::{
+        decode_payload, encode_payload, ClientSourceReport, Hello, HelloAck, RequestStart, WsOpen,
+    },
     version::VERSION as PROTOCOL_VERSION,
     Frame, FrameType,
 };
@@ -22,6 +24,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -43,6 +46,50 @@ struct PendingRequest {
 #[derive(Debug)]
 struct PendingWs {
     tx: mpsc::Sender<Message>,
+}
+
+const CLIENT_SOURCE_UPDATE_CAPABILITY: &str = "client_source_update";
+const DEFAULT_PUBLIC_IP_REFRESH_SECONDS: u64 = 3600;
+const MIN_PUBLIC_IP_REFRESH_SECONDS: u64 = 60;
+const PUBLIC_IP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_PUBLIC_IP_LOOKUP_URLS: &[&str] = &[
+    "https://api64.ipify.org?format=json",
+    "https://api.ipify.org?format=json",
+    "http://3.0.3.0",
+];
+
+#[derive(Debug, Clone)]
+struct PublicIpLookup {
+    urls: Vec<String>,
+    refresh_interval: Duration,
+}
+
+impl PublicIpLookup {
+    fn from_config(cfg: &ClientConfig) -> Self {
+        let urls = cfg
+            .public_ip_lookup_urls
+            .as_ref()
+            .filter(|urls| !urls.is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                DEFAULT_PUBLIC_IP_LOOKUP_URLS
+                    .iter()
+                    .map(|url| (*url).to_string())
+                    .collect()
+            })
+            .into_iter()
+            .map(|url| normalize_public_ip_lookup_url(&url))
+            .filter(|url| !url.is_empty())
+            .collect::<Vec<_>>();
+        let refresh_seconds = cfg
+            .public_ip_refresh_seconds
+            .unwrap_or(DEFAULT_PUBLIC_IP_REFRESH_SECONDS)
+            .max(MIN_PUBLIC_IP_REFRESH_SECONDS);
+        Self {
+            urls,
+            refresh_interval: Duration::from_secs(refresh_seconds),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -143,6 +190,7 @@ pub async fn connect(
     let mut ws_url = tunnel_ws_url(&server, &data.id, &data.token)?;
     let mut reconnect_delay = std::time::Duration::from_secs(1);
     let mut reconnect_token = None;
+    let public_ip_lookup = PublicIpLookup::from_config(&cfg);
 
     loop {
         if disconnect_requested() {
@@ -159,6 +207,7 @@ pub async fn connect(
             reconnect_token.clone(),
             json_events,
             &mut runtime_status,
+            &public_ip_lookup,
         )
         .await
         {
@@ -340,6 +389,7 @@ async fn run_tunnel_connection(
     reconnect_token: Option<String>,
     json_events: bool,
     runtime_status: &mut RuntimeStatus,
+    public_ip_lookup: &PublicIpLookup,
 ) -> anyhow::Result<ConnectionExit> {
     let (ws, _) = connect_async(ws_url)
         .await
@@ -365,6 +415,8 @@ async fn run_tunnel_connection(
         }
     });
 
+    let client_source = lookup_client_source(public_ip_lookup).await;
+
     frame_tx
         .send(Frame::new(
             FrameType::Hello,
@@ -379,6 +431,7 @@ async fn run_tunnel_connection(
                     "heartbeat".to_string(),
                 ],
                 reconnect_token,
+                client_source,
             })
             .context("encode hello payload")?,
         ))
@@ -404,6 +457,12 @@ async fn run_tunnel_connection(
     let mut goaway_received = false;
     let mut status_tick = tokio::time::interval(std::time::Duration::from_secs(1));
     status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut source_update_supported = false;
+    let mut source_update_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + public_ip_lookup.refresh_interval,
+        public_ip_lookup.refresh_interval,
+    );
+    source_update_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         pending.retain(|_, request| !request.task.is_finished());
@@ -442,6 +501,14 @@ async fn run_tunnel_connection(
                     });
                 }
             }
+            _ = source_update_tick.tick(), if source_update_supported => {
+                if let Some(report) = lookup_client_source(public_ip_lookup).await {
+                    let payload = encode_payload(&report).context("encode client source update")?;
+                    let _ = frame_tx
+                        .send(Frame::new(FrameType::ClientSourceUpdate, 0, payload))
+                        .await;
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 writer.abort();
                 return Ok(ConnectionExit::Interrupted {
@@ -474,6 +541,10 @@ async fn run_tunnel_connection(
                             );
                         }
                         next_reconnect_token = ack.reconnect_token;
+                        source_update_supported = ack
+                            .capabilities
+                            .iter()
+                            .any(|capability| capability == CLIENT_SOURCE_UPDATE_CAPABILITY);
                     }
                     FrameType::Ping => {
                         let _ = frame_tx
@@ -633,6 +704,93 @@ fn next_reconnect_delay(current: std::time::Duration) -> std::time::Duration {
     std::time::Duration::from_secs(next)
 }
 
+async fn lookup_client_source(public_ip_lookup: &PublicIpLookup) -> Option<ClientSourceReport> {
+    let public_ip = lookup_public_ip(public_ip_lookup).await?;
+    Some(ClientSourceReport {
+        public_ip,
+        checked_at_unix_seconds: Some(unix_now()),
+    })
+}
+
+async fn lookup_public_ip(public_ip_lookup: &PublicIpLookup) -> Option<String> {
+    if public_ip_lookup.urls.is_empty() {
+        return None;
+    }
+    let client = reqwest::Client::new();
+    for url in &public_ip_lookup.urls {
+        let request = client.get(url);
+        let response = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                tracing::debug!(%url, %error, "public IP lookup request failed");
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!(%url, "public IP lookup request timed out");
+                continue;
+            }
+        };
+        let body = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, response.text()).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(error)) => {
+                tracing::debug!(%url, %error, "public IP lookup response read failed");
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!(%url, "public IP lookup response read timed out");
+                continue;
+            }
+        };
+        if let Some(ip) = parse_public_ip_response(&body) {
+            return Some(ip);
+        }
+        tracing::debug!(%url, "public IP lookup returned no public IP");
+    }
+    None
+}
+
+fn parse_public_ip_response(body: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(ip) = value.get("ip").and_then(|value| value.as_str()) {
+            return parse_public_ip_candidate(ip);
+        }
+        if let Some(origin) = value.get("origin").and_then(|value| value.as_str()) {
+            return parse_public_ip_candidate(origin);
+        }
+    }
+    parse_public_ip_candidate(body)
+}
+
+fn parse_public_ip_candidate(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .trim_matches('"')
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    parse_public_ip(value).map(|ip| ip.to_string())
+}
+
+fn normalize_public_ip_lookup_url(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        return String::new();
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        value.to_string()
+    } else {
+        format!("http://{value}")
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 pub(crate) fn tunnel_ws_url(server: &str, tunnel_id: &str, token: &str) -> anyhow::Result<String> {
     let server = server.trim_end_matches('/');
     let scheme = if server.starts_with("https://") {
@@ -666,5 +824,31 @@ mod tests {
         assert!(!stored_tunnel_error_is_terminal(&anyhow::anyhow!(
             "connection refused"
         )));
+    }
+
+    #[test]
+    fn parses_public_ip_lookup_responses() {
+        assert_eq!(
+            parse_public_ip_response(r#"{"ip":"183.193.183.90","location":"x"}"#),
+            Some("183.193.183.90".to_string())
+        );
+        assert_eq!(
+            parse_public_ip_response(r#"{"origin":"8.8.8.8, 1.1.1.1"}"#),
+            Some("8.8.8.8".to_string())
+        );
+        assert_eq!(
+            parse_public_ip_response("2606:4700:4700::1111\n"),
+            Some("2606:4700:4700::1111".to_string())
+        );
+        assert_eq!(parse_public_ip_response(r#"{"ip":"127.0.0.1"}"#), None);
+    }
+
+    #[test]
+    fn normalizes_public_ip_lookup_urls() {
+        assert_eq!(normalize_public_ip_lookup_url("3.0.3.0"), "http://3.0.3.0");
+        assert_eq!(
+            normalize_public_ip_lookup_url("https://api.ipify.org?format=json"),
+            "https://api.ipify.org?format=json"
+        );
     }
 }
