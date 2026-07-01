@@ -570,8 +570,8 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "HTTP_TUNNEL_TRUSTED_PROXY_CIDRS",
             false,
             false,
-            "127.0.0.1/32,::1/128",
-            "CIDRs allowed to supply X-Forwarded-For.",
+            "127.0.0.1/32,::1/128,<Cloudflare IP ranges>",
+            "CIDRs allowed to supply CF-Connecting-IP, CF-IPCountry, and X-Forwarded-For.",
         ),
         schema(
             "database_url",

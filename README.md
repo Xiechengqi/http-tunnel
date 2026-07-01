@@ -147,7 +147,7 @@ cargo test -p http-tunnel-server --test e2e_http \
 
 ## 关键配置
 
-默认情况下，server 配置、SQLite 数据库和本地数据文件会保存在 `$HOME/.http-tunnel`，client 配置和运行态文件也使用同一个目录。常见配置项会保存到 `$HOME/.http-tunnel/server.toml`，也可通过命令行参数或环境变量覆盖。公开 dashboard 的地图定位是可选离线能力，将 `GeoLite2-City.mmdb` 放到 `$HOME/.http-tunnel/GeoLite2-City.mmdb` 后即可显示已定位来源。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
+默认情况下，server 配置、SQLite 数据库和本地数据文件会保存在 `$HOME/.http-tunnel`，client 配置和运行态文件也使用同一个目录。常见配置项会保存到 `$HOME/.http-tunnel/server.toml`，也可通过命令行参数或环境变量覆盖。公开 dashboard 的地图使用国家级热力图，不暴露精确坐标；Cloudflare proxy 场景会读取可信代理传入的 `CF-Connecting-IP` 和 `CF-IPCountry`，其他场景可将 `GeoIP-Country.mmdb` 放到 `$HOME/.http-tunnel/GeoIP-Country.mmdb`。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
 
 | 领域 | 配置 |
 | --- | --- |

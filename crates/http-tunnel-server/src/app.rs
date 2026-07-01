@@ -1,4 +1,4 @@
-use crate::{db, routes, state::AppState};
+use crate::{db, geoip, routes, state::AppState};
 use anyhow::Context;
 use axum::{
     body::Body,
@@ -16,6 +16,13 @@ use tower_http::trace::TraceLayer;
 
 pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<()> {
     let addr = config.addr;
+    match geoip::ensure_embedded_country_db(&config.data_dir) {
+        Ok(true) => {
+            tracing::info!(data_dir = %config.data_dir, "installed embedded GeoIP country database")
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "failed to install embedded GeoIP country database"),
+    }
     let pool = db::connect(&config.database_url).await?;
     let state = AppState::new(config_path, config, pool);
     spawn_cleanup_job(state.clone());

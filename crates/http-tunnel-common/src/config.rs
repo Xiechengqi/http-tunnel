@@ -64,7 +64,7 @@ impl Default for ServerConfig {
             public_scheme: "https".to_string(),
             addr: "0.0.0.0:80".parse().expect("valid default addr"),
             trust_proxy_headers: true,
-            trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
+            trusted_proxy_cidrs: default_trusted_proxy_cidrs(),
             database_url: default_database_url(),
             data_dir: default_data_dir(),
             tunnel_ttl_seconds: 86_400,
@@ -370,6 +370,38 @@ pub fn default_data_dir() -> String {
     default_home_dir().display().to_string()
 }
 
+pub fn default_trusted_proxy_cidrs() -> Vec<String> {
+    [
+        "127.0.0.1/32",
+        "::1/128",
+        "173.245.48.0/20",
+        "103.21.244.0/22",
+        "103.22.200.0/22",
+        "103.31.4.0/22",
+        "141.101.64.0/18",
+        "108.162.192.0/18",
+        "190.93.240.0/20",
+        "188.114.96.0/20",
+        "197.234.240.0/22",
+        "198.41.128.0/17",
+        "162.158.0.0/15",
+        "104.16.0.0/13",
+        "104.24.0.0/14",
+        "172.64.0.0/13",
+        "131.0.72.0/22",
+        "2400:cb00::/32",
+        "2606:4700::/32",
+        "2803:f800::/32",
+        "2405:b500::/32",
+        "2405:8100::/32",
+        "2a06:98c0::/29",
+        "2c0f:f248::/32",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +440,9 @@ mod tests {
             "/tmp/http-tunnel-home-test/.http-tunnel"
         );
         assert_eq!(ServerConfig::default().addr.port(), 80);
+        assert!(ServerConfig::default()
+            .trusted_proxy_cidrs
+            .contains(&"173.245.48.0/20".to_string()));
 
         unsafe {
             match original_home {

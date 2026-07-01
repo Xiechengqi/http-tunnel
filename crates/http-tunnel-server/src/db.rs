@@ -39,6 +39,8 @@ async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         sqlx::query(INIT_SQL).execute(pool).await?;
         record_schema_version(pool, INIT_SCHEMA_VERSION).await?;
     }
+    ensure_column(pool, "sessions", "client_country_code", "TEXT").await?;
+    ensure_column(pool, "sessions", "client_country", "TEXT").await?;
     Ok(())
 }
 
@@ -68,6 +70,25 @@ async fn record_schema_version(pool: &SqlitePool, version: &str) -> anyhow::Resu
         .bind(version)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(&pragma).fetch_all(pool).await?;
+    if rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == column)
+    {
+        return Ok(());
+    }
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}");
+    sqlx::query(&sql).execute(pool).await?;
     Ok(())
 }
 

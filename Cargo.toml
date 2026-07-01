@@ -20,6 +20,7 @@ base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+flate2 = "1"
 http = "1"
 http-body-util = "0.1"
 hmac = "0.12"

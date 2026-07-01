@@ -3,6 +3,8 @@
 /.http-tunnel/
 /crates/http-tunnel-server/public/build-info.json
 /crates/http-tunnel-server/public/_next/
+/crates/http-tunnel-server/assets/GeoIP-Country.mmdb
+/crates/http-tunnel-server/assets/GeoIP-Country.mmdb.gz
 /dashboard/.next/
 /dashboard/out/
 /dashboard/node_modules/

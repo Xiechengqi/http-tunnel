@@ -12,6 +12,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
+import WorldMap, { regions, type CountryContext, type DataItem } from "react-svg-worldmap";
 import { TopBar } from "@/components/layout/top-bar";
 import { MetricCard } from "@/components/metric-card";
 import { EmptyState, ErrorState, LoadingState } from "@/components/state-block";
@@ -21,10 +22,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { publicApi } from "@/lib/api";
-import type { DashboardSummary, PublicTunnel, PublicTunnelMapPoint } from "@/lib/types";
+import type { DashboardSummary, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
 import { cn, formatBytes, formatNumber } from "@/lib/utils";
 
 type StatusFilter = "all" | "online" | "offline";
+
+const COUNTRY_NAMES = new Map(regions.map((region) => [region.code.toUpperCase(), region.name]));
 
 export default function PublicDashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -72,11 +75,20 @@ export default function PublicDashboardPage() {
     });
   }, [query, statusFilter, summary?.tunnels]);
 
-  const visibleMapPoints = useMemo(() => {
+  const visibleCountrySources = useMemo(() => {
     if (!summary) return [];
-    const visible = new Set(filteredTunnels.map((tunnel) => tunnel.subdomain));
-    return summary.map_points.filter((point) => visible.has(point.subdomain));
+    const filtered = filteredTunnels.length !== summary.tunnels.length;
+    if (!filtered) return summary.country_sources || [];
+    return countrySourcesFromTunnels(filteredTunnels);
   }, [filteredTunnels, summary]);
+  const visibleClientCount = useMemo(
+    () => filteredTunnels.reduce((total, tunnel) => total + tunnel.active_sessions, 0),
+    [filteredTunnels],
+  );
+  const visibleUnknownClientCount = useMemo(() => {
+    const known = visibleCountrySources.reduce((total, country) => total + country.client_count, 0);
+    return Math.max(0, visibleClientCount - known);
+  }, [visibleClientCount, visibleCountrySources]);
 
   const status = error
     ? "Unable to load dashboard"
@@ -115,10 +127,14 @@ export default function PublicDashboardPage() {
                   <MapPinned className="h-4 w-4 text-primary" />
                   Source map
                 </CardTitle>
-                <Badge variant="muted">{formatNumber(visibleMapPoints.length)} located</Badge>
+                <Badge variant="muted">{formatNumber(visibleCountrySources.length)} countries</Badge>
               </CardHeader>
               <CardContent className="p-0">
-                <TunnelSourceMap points={visibleMapPoints} total={filteredTunnels.length} />
+                <TunnelSourceMap
+                  countries={visibleCountrySources}
+                  totalClients={visibleClientCount}
+                  unknownClients={visibleUnknownClientCount}
+                />
               </CardContent>
             </Card>
 
@@ -237,38 +253,52 @@ function CommandBlock({ title, command }: { title: string; command: string }) {
   );
 }
 
-function TunnelSourceMap({ points, total }: { points: PublicTunnelMapPoint[]; total: number }) {
+function TunnelSourceMap({
+  countries,
+  totalClients,
+  unknownClients,
+}: {
+  countries: PublicTunnelCountrySource[];
+  totalClients: number;
+  unknownClients: number;
+}) {
+  const data = countries
+    .filter((country) => country.country_code)
+    .map((country) => ({
+      country: country.country_code.toLowerCase(),
+      value: country.client_count,
+    })) as DataItem<number>[];
+  const countryMeta = new Map(countries.map((country) => [country.country_code.toUpperCase(), country]));
+  const maxClients = countries.reduce((max, country) => Math.max(max, country.client_count), 0);
+
   return (
-    <div className="relative h-[320px] overflow-hidden border-t border-border bg-sky-50 md:h-[380px] dark:bg-[#07111f]">
-      <svg className="h-full w-full" viewBox="0 0 1000 440" role="img" aria-label="Tunnel source map">
-        <defs>
-          <radialGradient id="mapGlow" cx="50%" cy="42%" r="70%">
-            <stop offset="0%" stopColor="#0A94F2" stopOpacity="0.18" />
-            <stop offset="65%" stopColor="#0A94F2" stopOpacity="0.04" />
-            <stop offset="100%" stopColor="#0A94F2" stopOpacity="0" />
-          </radialGradient>
-        </defs>
-        <rect width="1000" height="440" fill="url(#mapGlow)" />
-        <MapGrid />
-        <WorldSilhouette />
-        {points.map((point, index) => {
-          const { x, y } = project(point.longitude, point.latitude);
-          const offset = pointOffset(index);
-          const tone = point.status === "connected" || point.active_sessions > 0 ? "online" : "offline";
-          return (
-            <g key={`${point.subdomain}-${index}`} transform={`translate(${x + offset.x} ${y + offset.y})`}>
-              <title>{`${point.subdomain} · ${point.label}`}</title>
-              <circle className={cn("animate-ping", tone === "online" ? "fill-emerald-400/30" : "fill-amber-300/25")} r="12" />
-              <circle className={tone === "online" ? "fill-emerald-400" : "fill-amber-300"} r="4.5" />
-              <circle className="fill-white" r="1.5" />
-            </g>
-          );
-        })}
-      </svg>
-      {points.length === 0 ? (
+    <div className="relative min-h-[320px] overflow-hidden border-t border-border bg-sky-50 px-3 py-4 md:min-h-[380px] dark:bg-[#07111f]">
+      <div className="mx-auto max-w-5xl">
+        <WorldMap
+          data={data}
+          color="#0A94F2"
+          size="responsive"
+          frame={false}
+          backgroundColor="transparent"
+          borderColor="rgba(14, 116, 144, 0.22)"
+          tooltipBgColor="hsl(var(--popover))"
+          tooltipTextColor="hsl(var(--popover-foreground))"
+          richInteraction
+          tooltipTextFunction={(context) => countryTooltip(context, countryMeta)}
+          styleFunction={(context) => countryStyle(context, maxClients)}
+        />
+      </div>
+      <div className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-10 rounded-sm bg-gradient-to-r from-sky-100 to-sky-500 ring-1 ring-border" />
+          <span>{formatNumber(totalClients)} active clients</span>
+        </div>
+        {unknownClients > 0 ? <span>{formatNumber(unknownClients)} unknown</span> : null}
+      </div>
+      {countries.length === 0 ? (
         <div className="absolute inset-0 flex items-center justify-center px-4">
           <div className="rounded-md border border-border bg-background/80 px-4 py-3 text-center text-sm text-muted-foreground shadow-sm backdrop-blur">
-            {total > 0 ? "No located tunnel sources" : "No tunnels"}
+            {totalClients > 0 ? "No country data for active clients" : "No active clients"}
           </div>
         </div>
       ) : null}
@@ -276,33 +306,32 @@ function TunnelSourceMap({ points, total }: { points: PublicTunnelMapPoint[]; to
   );
 }
 
-function MapGrid() {
-  const vertical = [-120, -60, 0, 60, 120].map((lon) => project(lon, 0).x);
-  const horizontal = [-45, 0, 45].map((lat) => project(0, lat).y);
-  return (
-    <g>
-      {vertical.map((x) => (
-        <line key={`v-${x}`} x1={x} x2={x} y1="34" y2="406" className="stroke-sky-200 dark:stroke-white/10" strokeWidth="1" />
-      ))}
-      {horizontal.map((y) => (
-        <line key={`h-${y}`} x1="60" x2="940" y1={y} y2={y} className="stroke-sky-200 dark:stroke-white/10" strokeWidth="1" />
-      ))}
-    </g>
-  );
+function countryTooltip(context: CountryContext<number>, countryMeta: Map<string, PublicTunnelCountrySource>) {
+  const code = context.countryCode.toUpperCase();
+  const source = countryMeta.get(code);
+  const name = source?.country || COUNTRY_NAMES.get(code) || context.countryName || code;
+  return `${name}
+Clients: ${formatNumber(source?.client_count || 0)}
+Tunnels: ${formatNumber(source?.tunnel_count || 0)}`;
 }
 
-function WorldSilhouette() {
-  return (
-    <g className="fill-sky-100 stroke-sky-300 dark:fill-slate-700/55 dark:stroke-slate-500/30" strokeWidth="1">
-      <path d="M105 145 170 82 256 94 318 139 286 201 221 219 166 197 123 213 78 184Z" />
-      <path d="M263 236 318 253 340 314 311 388 263 357 237 286Z" />
-      <path d="M438 121 510 95 582 119 557 166 486 175 432 158Z" />
-      <path d="M508 182 576 177 620 237 594 335 540 361 498 294 465 232Z" />
-      <path d="M610 111 748 85 890 145 834 212 704 201 619 168Z" />
-      <path d="M738 226 816 246 850 321 797 347 724 310Z" />
-      <path d="M833 331 900 345 925 392 852 388Z" />
-    </g>
-  );
+function countryStyle(context: CountryContext<number>, maxClients: number) {
+  const value = Number(context.countryValue || 0);
+  if (!value || !maxClients) {
+    return {
+      fill: "rgba(186, 230, 253, 0.34)",
+      stroke: "rgba(14, 116, 144, 0.22)",
+      strokeWidth: 0.6,
+      cursor: "default",
+    };
+  }
+  const intensity = Math.max(0.22, Math.min(1, value / maxClients));
+  return {
+    fill: `rgba(10, 148, 242, ${0.28 + intensity * 0.62})`,
+    stroke: "rgba(7, 89, 133, 0.42)",
+    strokeWidth: 0.8,
+    cursor: "pointer",
+  };
 }
 
 function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
@@ -350,7 +379,7 @@ function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
               <TableCell>
                 <div className="flex items-center gap-2">
                   <Globe2 className={cn("h-4 w-4", tunnel.source.located ? "text-primary" : "text-muted-foreground")} />
-                  <span className="max-w-[220px] truncate">{tunnel.source.label}</span>
+                  <span className="max-w-[220px] truncate">{sourceLabel(tunnel)}</span>
                 </div>
               </TableCell>
               <TableCell className="text-right">{formatNumber(tunnel.active_sessions)}</TableCell>
@@ -379,20 +408,28 @@ function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
   );
 }
 
-function project(longitude: number, latitude: number) {
-  return {
-    x: ((longitude + 180) / 360) * 880 + 60,
-    y: ((90 - latitude) / 180) * 360 + 40,
-  };
+function countrySourcesFromTunnels(tunnels: PublicTunnel[]): PublicTunnelCountrySource[] {
+  const byCountry = new Map<string, PublicTunnelCountrySource>();
+  for (const tunnel of tunnels) {
+    const code = tunnel.source.country_code?.toUpperCase();
+    if (!code || !tunnel.active_sessions) continue;
+    const current = byCountry.get(code) || {
+      country_code: code,
+      country: tunnel.source.country || COUNTRY_NAMES.get(code) || code,
+      client_count: 0,
+      tunnel_count: 0,
+    };
+    current.client_count += tunnel.active_sessions;
+    current.tunnel_count += 1;
+    byCountry.set(code, current);
+  }
+  return Array.from(byCountry.values()).sort((a, b) => b.client_count - a.client_count || a.country_code.localeCompare(b.country_code));
 }
 
-function pointOffset(index: number) {
-  const angle = (index % 12) * 0.92;
-  const radius = Math.floor(index / 12) * 3;
-  return {
-    x: Math.cos(angle) * radius,
-    y: Math.sin(angle) * radius,
-  };
+function sourceLabel(tunnel: PublicTunnel) {
+  const code = tunnel.source.country_code?.toUpperCase();
+  if (!code) return tunnel.source.label;
+  return tunnel.source.country || COUNTRY_NAMES.get(code) || code;
 }
 
 function formatDate(value?: string | null) {

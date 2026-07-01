@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     client_version TEXT,
     client_capabilities TEXT,
-    remote_addr TEXT
+    remote_addr TEXT,
+    client_country_code TEXT,
+    client_country TEXT
 );
 
 CREATE TABLE IF NOT EXISTS request_logs (

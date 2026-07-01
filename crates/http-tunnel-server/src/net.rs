@@ -7,18 +7,59 @@ pub fn client_ip(
     trust_proxy_headers: bool,
     trusted_proxy_cidrs: &[String],
 ) -> String {
-    if trust_proxy_headers && proxy_is_trusted(remote_addr.ip(), trusted_proxy_cidrs) {
-        if let Some(forwarded) = headers
-            .get("x-forwarded-for")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return forwarded.to_string();
-        }
+    client_ip_from_headers(
+        headers,
+        remote_addr,
+        trust_proxy_headers,
+        trusted_proxy_cidrs,
+    )
+    .unwrap_or_else(|| remote_addr.ip().to_string())
+}
+
+pub fn client_ip_from_headers(
+    headers: &HeaderMap,
+    remote_addr: SocketAddr,
+    trust_proxy_headers: bool,
+    trusted_proxy_cidrs: &[String],
+) -> Option<String> {
+    if !trust_proxy_headers || !proxy_is_trusted(remote_addr.ip(), trusted_proxy_cidrs) {
+        return None;
     }
-    remote_addr.ip().to_string()
+    headers
+        .get("cf-connecting-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_header_ip)
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+                .and_then(normalize_header_ip)
+        })
+}
+
+pub fn client_country_code_from_headers(
+    headers: &HeaderMap,
+    remote_addr: SocketAddr,
+    trust_proxy_headers: bool,
+    trusted_proxy_cidrs: &[String],
+) -> Option<String> {
+    if !trust_proxy_headers || !proxy_is_trusted(remote_addr.ip(), trusted_proxy_cidrs) {
+        return None;
+    }
+    headers
+        .get("cf-ipcountry")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| crate::geoip::normalize_country_code(Some(value)))
+}
+
+fn normalize_header_ip(value: &str) -> Option<String> {
+    value
+        .trim()
+        .trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
 }
 
 pub fn cidr_is_valid(cidr: &str) -> bool {
@@ -99,5 +140,47 @@ mod tests {
         assert_eq!(client_ip(&headers, remote, true, &trusted), "198.51.100.10");
         assert_eq!(client_ip(&headers, remote, true, &untrusted), "127.0.0.1");
         assert_eq!(client_ip(&headers, remote, false, &trusted), "127.0.0.1");
+    }
+
+    #[test]
+    fn cloudflare_headers_take_precedence_when_proxy_is_trusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("x-forwarded-for", "198.51.100.10".parse().unwrap());
+        headers.insert("cf-ipcountry", "us".parse().unwrap());
+        let trusted = vec!["173.245.48.0/20".to_string()];
+        let remote = "173.245.48.10:443".parse().unwrap();
+
+        assert_eq!(client_ip(&headers, remote, true, &trusted), "203.0.113.7");
+        assert_eq!(
+            client_country_code_from_headers(&headers, remote, true, &trusted),
+            Some("US".to_string())
+        );
+    }
+
+    #[test]
+    fn cloudflare_headers_are_ignored_from_untrusted_peer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+        headers.insert("cf-ipcountry", "us".parse().unwrap());
+        let trusted = vec!["173.245.48.0/20".to_string()];
+        let remote = "198.51.100.20:443".parse().unwrap();
+
+        assert_eq!(client_ip(&headers, remote, true, &trusted), "198.51.100.20");
+        assert_eq!(
+            client_country_code_from_headers(&headers, remote, true, &trusted),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_proxy_ip_headers_are_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "not-an-ip".parse().unwrap());
+        headers.insert("x-forwarded-for", "also-bad".parse().unwrap());
+        let trusted = vec!["173.245.48.0/20".to_string()];
+        let remote = "173.245.48.10:443".parse().unwrap();
+
+        assert_eq!(client_ip(&headers, remote, true, &trusted), "173.245.48.10");
     }
 }

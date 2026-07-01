@@ -143,7 +143,7 @@ The admin dashboard is available at `/admin`; first-time setup is at `/admin/set
 
 ## Key Configuration
 
-By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. Public dashboard map geolocation is optional and offline-only; place `GeoLite2-City.mmdb` at `$HOME/.http-tunnel/GeoLite2-City.mmdb` to show located sources. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
+By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. The public dashboard map is a country-level heat map and does not expose precise coordinates. Cloudflare proxy deployments use trusted `CF-Connecting-IP` and `CF-IPCountry` headers; other deployments can place `GeoIP-Country.mmdb` at `$HOME/.http-tunnel/GeoIP-Country.mmdb`. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
 
 | Area | Settings |
 | --- | --- |

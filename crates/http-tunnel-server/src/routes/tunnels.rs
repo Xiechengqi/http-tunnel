@@ -1,6 +1,7 @@
 use crate::{
     error::{AppError, Result},
-    net::client_ip,
+    geoip,
+    net::{client_country_code_from_headers, client_ip},
     routes::admin::{
         list_response, record_admin_audit, require_admin, require_admin_write, AuditLog,
     },
@@ -116,6 +117,46 @@ pub struct TunnelDetail {
 #[derive(Debug, Serialize)]
 pub struct RotateTokenResponse {
     pub token: String,
+}
+
+#[derive(Debug, Clone)]
+struct ClientSource {
+    ip: String,
+    country_code: Option<String>,
+    country: Option<String>,
+}
+
+fn client_source(
+    headers: &HeaderMap,
+    remote_addr: SocketAddr,
+    cfg: &http_tunnel_common::ServerConfig,
+) -> ClientSource {
+    let ip = client_ip(
+        headers,
+        remote_addr,
+        cfg.trust_proxy_headers,
+        &cfg.trusted_proxy_cidrs,
+    );
+    let header_country = client_country_code_from_headers(
+        headers,
+        remote_addr,
+        cfg.trust_proxy_headers,
+        &cfg.trusted_proxy_cidrs,
+    );
+    let geo_country = ip
+        .parse()
+        .ok()
+        .and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
+
+    ClientSource {
+        ip,
+        country_code: header_country.or_else(|| {
+            geo_country
+                .as_ref()
+                .map(|country| country.country_code.clone())
+        }),
+        country: geo_country.and_then(|country| country.country),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +405,7 @@ pub async fn connect_ws(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<ConnectQuery>,
+    headers: HeaderMap,
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
@@ -397,9 +439,13 @@ pub async fn connect_ws(
     }
 
     let session_id = generate_session_id();
-    Ok(ws.on_upgrade(move |socket| {
-        handle_socket(state, socket, id, subdomain, session_id, remote_addr)
-    }))
+    let cfg = state.config.read().await.clone();
+    let source = client_source(&headers, remote_addr, &cfg);
+    Ok(
+        ws.on_upgrade(move |socket| {
+            handle_socket(state, socket, id, subdomain, session_id, source)
+        }),
+    )
 }
 
 async fn handle_socket(
@@ -408,7 +454,7 @@ async fn handle_socket(
     tunnel_id: String,
     subdomain: String,
     session_id: String,
-    remote_addr: SocketAddr,
+    source: ClientSource,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (frame_tx, mut frame_rx) = mpsc::channel::<Frame>(256);
@@ -474,7 +520,7 @@ async fn handle_socket(
                                         &state,
                                         &active_session,
                                         &subdomain,
-                                        remote_addr,
+                                        &source,
                                         &frame.payload,
                                     )
                                     .await
@@ -606,7 +652,7 @@ async fn handle_client_hello(
     state: &AppState,
     session: &ActiveSession,
     subdomain: &str,
-    remote_addr: SocketAddr,
+    source: &ClientSource,
     payload: &[u8],
 ) -> HelloResult {
     let hello = match decode_payload::<Hello>(payload) {
@@ -699,13 +745,15 @@ async fn handle_client_hello(
         .await;
     }
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO sessions (id, tunnel_id, remote_addr) VALUES (?1, ?2, ?3); \
-         UPDATE sessions SET client_version = ?4, client_capabilities = ?5, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?1; \
-         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?6) WHERE id = ?2",
+        "INSERT OR IGNORE INTO sessions (id, tunnel_id, remote_addr, client_country_code, client_country) VALUES (?1, ?2, ?3, ?4, ?5); \
+         UPDATE sessions SET client_version = ?6, client_capabilities = ?7, last_seen_at = CURRENT_TIMESTAMP, remote_addr = ?3, client_country_code = ?4, client_country = ?5 WHERE id = ?1; \
+         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?8) WHERE id = ?2",
     )
     .bind(&session.session_id)
     .bind(&session.tunnel_id)
-    .bind(remote_addr.to_string())
+    .bind(&source.ip)
+    .bind(source.country_code.as_deref())
+    .bind(source.country.as_deref())
     .bind(hello.client_version.as_deref())
     .bind(capabilities)
     .bind(format!("+{} seconds", cfg.tunnel_ttl_seconds))

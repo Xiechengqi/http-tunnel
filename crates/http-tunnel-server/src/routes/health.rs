@@ -33,7 +33,7 @@ pub struct DashboardSummary {
     pub server_url: Option<String>,
     pub stats: DashboardStats,
     pub tunnels: Vec<PublicTunnel>,
-    pub map_points: Vec<PublicTunnelMapPoint>,
+    pub country_sources: Vec<PublicTunnelCountrySource>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -48,6 +48,7 @@ pub struct DashboardStats {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub located_sources: usize,
+    pub unknown_sources: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,27 +73,22 @@ pub struct PublicTunnelSource {
     pub label: String,
     pub country_code: Option<String>,
     pub country: Option<String>,
-    pub region: Option<String>,
-    pub city: Option<String>,
-    pub latitude: Option<f64>,
-    pub longitude: Option<f64>,
     pub located: bool,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PublicTunnelMapPoint {
-    pub subdomain: String,
-    pub status: String,
-    pub label: String,
-    pub latitude: f64,
-    pub longitude: f64,
-    pub active_sessions: usize,
+pub struct PublicTunnelCountrySource {
+    pub country_code: String,
+    pub country: Option<String>,
+    pub client_count: usize,
+    pub tunnel_count: usize,
 }
 
 #[derive(Debug, Default)]
 struct RuntimeTunnelMetrics {
     active_sessions: usize,
     active_streams: usize,
+    session_ids: Vec<String>,
 }
 
 pub async fn health() -> Json<ApiResponse<Health>> {
@@ -105,20 +101,8 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
     let database_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     let runtime = runtime_tunnel_metrics(&state).await;
     let tunnels = public_tunnels(&state, &cfg, &runtime).await;
-    let map_points = tunnels
-        .iter()
-        .filter_map(|tunnel| {
-            Some(PublicTunnelMapPoint {
-                subdomain: tunnel.subdomain.clone(),
-                status: tunnel.status.clone(),
-                label: tunnel.source.label.clone(),
-                latitude: tunnel.source.latitude?,
-                longitude: tunnel.source.longitude?,
-                active_sessions: tunnel.active_sessions,
-            })
-        })
-        .collect::<Vec<_>>();
-    let stats = dashboard_stats(&tunnels, &map_points);
+    let country_sources = public_country_sources(&state, &runtime).await;
+    let stats = dashboard_stats(&tunnels, &country_sources);
 
     Json(ApiResponse::ok(DashboardSummary {
         ready: if setup_required || !database_ok {
@@ -131,7 +115,7 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
         server_url: dashboard_server_url(&cfg),
         stats,
         tunnels,
-        map_points,
+        country_sources,
     }))
 }
 
@@ -190,6 +174,7 @@ async fn runtime_tunnel_metrics(state: &AppState) -> HashMap<String, RuntimeTunn
         let entry = metrics.entry(session.tunnel_id.clone()).or_default();
         entry.active_sessions += 1;
         entry.active_streams += snapshot.active_streams;
+        entry.session_ids.push(session.session_id.clone());
     }
     metrics
 }
@@ -201,7 +186,8 @@ async fn public_tunnels(
 ) -> Vec<PublicTunnel> {
     let rows = sqlx::query(
         "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.client_ip, \
-                ls.remote_addr AS latest_remote_addr, ls.last_seen_at AS latest_seen_at, \
+                ls.remote_addr AS latest_remote_addr, ls.client_country_code AS latest_country_code, \
+                ls.client_country AS latest_country, ls.last_seen_at AS latest_seen_at, \
                 COALESCE(req.request_count, 0) AS request_count, \
                 COALESCE(req.error_count, 0) AS error_count, \
                 COALESCE(req.bytes_in, 0) AS bytes_in, \
@@ -253,8 +239,24 @@ async fn public_tunnels(
                     .as_deref(),
             );
             let source_present = source_ip.is_some();
+            let row_country_code = row
+                .try_get::<Option<String>, _>("latest_country_code")
+                .ok()
+                .flatten()
+                .and_then(|code| geoip::normalize_country_code(Some(&code)));
+            let row_country = row
+                .try_get::<Option<String>, _>("latest_country")
+                .ok()
+                .flatten()
+                .filter(|value| !value.trim().is_empty());
+            let geo_country = source_ip.and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
             let source = public_source(
-                source_ip.and_then(|ip| geoip::lookup(&cfg.data_dir, ip)),
+                row_country_code.or_else(|| {
+                    geo_country
+                        .as_ref()
+                        .map(|country| country.country_code.clone())
+                }),
+                row_country.or_else(|| geo_country.and_then(|country| country.country)),
                 source_present,
             );
             PublicTunnel {
@@ -281,13 +283,68 @@ async fn public_tunnels(
         .collect()
 }
 
+async fn public_country_sources(
+    state: &AppState,
+    runtime: &HashMap<String, RuntimeTunnelMetrics>,
+) -> Vec<PublicTunnelCountrySource> {
+    let session_ids = runtime
+        .values()
+        .flat_map(|metrics| metrics.session_ids.iter().cloned())
+        .collect::<Vec<_>>();
+    if session_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT client_country_code, MAX(client_country) AS client_country, COUNT(*) AS client_count, COUNT(DISTINCT tunnel_id) AS tunnel_count \
+         FROM sessions WHERE id IN (",
+    );
+    let mut separated = builder.separated(", ");
+    for session_id in &session_ids {
+        separated.push_bind(session_id);
+    }
+    separated.push_unseparated(
+        ") AND client_country_code IS NOT NULL AND client_country_code != '' \
+         GROUP BY client_country_code ORDER BY client_count DESC, client_country_code ASC",
+    );
+
+    builder
+        .build()
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| {
+            let country_code = row
+                .try_get::<Option<String>, _>("client_country_code")
+                .ok()
+                .flatten()
+                .and_then(|code| geoip::normalize_country_code(Some(&code)))?;
+            Some(PublicTunnelCountrySource {
+                country_code,
+                country: row
+                    .try_get::<Option<String>, _>("client_country")
+                    .ok()
+                    .flatten()
+                    .filter(|value| !value.trim().is_empty()),
+                client_count: non_negative_usize(row.get::<i64, _>("client_count")),
+                tunnel_count: non_negative_usize(row.get::<i64, _>("tunnel_count")),
+            })
+        })
+        .collect()
+}
+
 fn dashboard_stats(
     tunnels: &[PublicTunnel],
-    map_points: &[PublicTunnelMapPoint],
+    country_sources: &[PublicTunnelCountrySource],
 ) -> DashboardStats {
+    let located_sources = country_sources
+        .iter()
+        .map(|source| source.client_count)
+        .sum::<usize>();
     let mut stats = DashboardStats {
         total_tunnels: tunnels.len(),
-        located_sources: map_points.len(),
+        located_sources,
         ..DashboardStats::default()
     };
     for tunnel in tunnels {
@@ -303,6 +360,7 @@ fn dashboard_stats(
         stats.bytes_in = stats.bytes_in.saturating_add(tunnel.bytes_in);
         stats.bytes_out = stats.bytes_out.saturating_add(tunnel.bytes_out);
     }
+    stats.unknown_sources = stats.active_sessions.saturating_sub(stats.located_sources);
     stats
 }
 
@@ -324,62 +382,42 @@ fn parse_ip(raw: &str) -> Option<IpAddr> {
         .or_else(|| value.trim_matches(['[', ']']).parse::<IpAddr>().ok())
 }
 
-fn public_source(location: Option<geoip::GeoLocation>, source_present: bool) -> PublicTunnelSource {
-    let Some(location) = location else {
+fn public_source(
+    country_code: Option<String>,
+    country: Option<String>,
+    source_present: bool,
+) -> PublicTunnelSource {
+    let Some(country_code) = country_code else {
         return PublicTunnelSource {
             label: if source_present {
-                "Unlocated source".to_string()
+                "Unknown country".to_string()
             } else {
                 "Unknown source".to_string()
             },
             country_code: None,
             country: None,
-            region: None,
-            city: None,
-            latitude: None,
-            longitude: None,
             located: false,
         };
     };
-    let label = location_label(&location);
+    let label = country
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&country_code)
+        .to_string();
     PublicTunnelSource {
         label,
-        country_code: location.country_code,
-        country: location.country,
-        region: location.region,
-        city: location.city,
-        latitude: Some(location.latitude),
-        longitude: Some(location.longitude),
+        country_code: Some(country_code),
+        country,
         located: true,
-    }
-}
-
-fn location_label(location: &geoip::GeoLocation) -> String {
-    let mut parts = Vec::new();
-    if let Some(city) = location.city.as_deref() {
-        parts.push(city);
-    }
-    if let Some(region) = location.region.as_deref() {
-        if !parts.iter().any(|part| *part == region) {
-            parts.push(region);
-        }
-    }
-    if let Some(country) = location.country.as_deref() {
-        if !parts.iter().any(|part| *part == country) {
-            parts.push(country);
-        }
-    } else if let Some(code) = location.country_code.as_deref() {
-        parts.push(code);
-    }
-    if parts.is_empty() {
-        "Located source".to_string()
-    } else {
-        parts.join(", ")
     }
 }
 
 fn non_negative_u64(value: i64) -> u64 {
     u64::try_from(value.max(0)).unwrap_or_default()
+}
+
+fn non_negative_usize(value: i64) -> usize {
+    usize::try_from(value.max(0)).unwrap_or_default()
 }
 
 fn unix_now() -> u64 {

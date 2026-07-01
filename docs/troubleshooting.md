@@ -31,6 +31,7 @@ Cloudflare:
 - Ensure wildcard DNS is proxied.
 - Ensure WebSocket support is enabled.
 - Use `public_scheme = "https"` for public Cloudflare HTTPS.
+- If the dashboard country map is empty or points to the wrong country, confirm `trusted_proxy_cidrs` includes Cloudflare ranges so `CF-Connecting-IP` and `CF-IPCountry` are trusted.
 
 Upgrade rollback:
 

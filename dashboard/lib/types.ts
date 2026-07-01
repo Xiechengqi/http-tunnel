@@ -14,7 +14,7 @@ export type DashboardSummary = {
   server_url?: string | null;
   stats: DashboardStats;
   tunnels: PublicTunnel[];
-  map_points: PublicTunnelMapPoint[];
+  country_sources: PublicTunnelCountrySource[];
 };
 
 export type DashboardStats = {
@@ -28,6 +28,7 @@ export type DashboardStats = {
   bytes_in: number;
   bytes_out: number;
   located_sources: number;
+  unknown_sources: number;
 };
 
 export type PublicTunnel = {
@@ -50,20 +51,14 @@ export type PublicTunnelSource = {
   label: string;
   country_code?: string | null;
   country?: string | null;
-  region?: string | null;
-  city?: string | null;
-  latitude?: number | null;
-  longitude?: number | null;
   located: boolean;
 };
 
-export type PublicTunnelMapPoint = {
-  subdomain: string;
-  status: string;
-  label: string;
-  latitude: number;
-  longitude: number;
-  active_sessions: number;
+export type PublicTunnelCountrySource = {
+  country_code: string;
+  country?: string | null;
+  client_count: number;
+  tunnel_count: number;
 };
 
 export type AdminStatus = {

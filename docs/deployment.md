@@ -12,7 +12,7 @@ The dashboard is built as a Next.js static export and embedded into the server b
 
 Without `--config`, the server uses `$HOME/.http-tunnel/server.toml`, `sqlite://$HOME/.http-tunnel/http-tunnel.sqlite3`, and `$HOME/.http-tunnel` for local data. Pass `--config` or set `HTTP_TUNNEL_CONFIG` only when a deployment needs a different location.
 
-The public dashboard source map is optional and offline-only. Put `GeoLite2-City.mmdb` in the data directory, for example `$HOME/.http-tunnel/GeoLite2-City.mmdb`; without it, the tunnel table still works and the map shows no located points.
+The public dashboard source map is a country-level heat map. Cloudflare proxy deployments use trusted `CF-Connecting-IP` and `CF-IPCountry` headers. For non-Cloudflare deployments, put a compatible country mmdb at `$HOME/.http-tunnel/GeoIP-Country.mmdb`. Release builds can also embed `GeoIP-Country.mmdb.gz` by setting `HTTP_TUNNEL_EMBED_GEOIP_COUNTRY_GZ` or placing it at `crates/http-tunnel-server/assets/GeoIP-Country.mmdb.gz`; on startup the server writes it to the data directory only when no local database exists.
 
 The server owns setup, admin, public API, tunnel WebSocket, and subdomain proxy traffic on one HTTP listener.
 

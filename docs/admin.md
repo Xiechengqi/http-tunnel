@@ -2,7 +2,7 @@
 
 On first launch, open `/admin/setup`, initialize the password and runtime config, then log in at `/admin/login`.
 
-The public dashboard is served at `/` and shows a read-only tunnel overview: status, public URL, source region, active sessions/streams, request/error counts, traffic totals, last seen time, expiry, and a source map when local GeoIP data is available. The authenticated operations console is served at `/admin`.
+The public dashboard is served at `/` and shows a read-only tunnel overview: status, public URL, source country, active sessions/streams, request/error counts, traffic totals, last seen time, expiry, and a country-level source heat map. The authenticated operations console is served at `/admin`.
 
 Admin auth is password-only. Login returns a bearer token for API clients and sets an httpOnly signed session cookie for the browser UI. Browser sessions and bearer tokens expire server-side after seven days.
 
@@ -65,7 +65,7 @@ POST /api/admin/restart
 
 `GET /api/v1/ready` returns `200` when setup is complete and the database answers `SELECT 1`. It returns `503` while setup is still required or the database readiness check fails.
 
-`GET /api/v1/dashboard` returns public tunnel data only. It intentionally excludes admin-only configuration such as access policies, tokens, rate limits, inspector settings, full client IPs, audit data, and database/runtime internals. To enable map coordinates, place `GeoLite2-City.mmdb` in the configured data directory, which defaults to `$HOME/.http-tunnel`.
+`GET /api/v1/dashboard` returns public tunnel data only. It intentionally excludes admin-only configuration such as access policies, tokens, rate limits, inspector settings, full client IPs, audit data, and database/runtime internals. Country data comes from trusted `CF-IPCountry` headers when traffic arrives through Cloudflare, or from `GeoIP-Country.mmdb` in the configured data directory, which defaults to `$HOME/.http-tunnel`.
 
 `GET /metrics` returns Prometheus text format with active session, active stream, tunnel status, request, byte, WebSocket session/message, disconnect reason, reconnect token, stale-session, and audit counters. It is protected by default. Access is allowed when `metrics_public = true`, when the direct peer IP matches `trusted_proxy_cidrs`, when the request is authenticated as admin, or when `Authorization: Bearer <token>` matches the dedicated `metrics_bearer_token_hash`.
 

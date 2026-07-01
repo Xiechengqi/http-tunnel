@@ -10,6 +10,7 @@ axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 http-tunnel-common = { path = "../http-tunnel-common" }
