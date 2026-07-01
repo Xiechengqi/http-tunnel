@@ -62,7 +62,7 @@ impl Default for ServerConfig {
         Self {
             domain: None,
             public_scheme: "https".to_string(),
-            addr: "0.0.0.0:8080".parse().expect("valid default addr"),
+            addr: "0.0.0.0:80".parse().expect("valid default addr"),
             trust_proxy_headers: true,
             trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
             database_url: default_database_url(),
@@ -407,6 +407,7 @@ mod tests {
             ServerConfig::default().data_dir,
             "/tmp/http-tunnel-home-test/.http-tunnel"
         );
+        assert_eq!(ServerConfig::default().addr.port(), 80);
 
         unsafe {
             match original_home {

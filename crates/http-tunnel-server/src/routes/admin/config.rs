@@ -552,7 +552,7 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "HTTP_TUNNEL_ADDR",
             false,
             true,
-            "0.0.0.0:8080",
+            "0.0.0.0:80",
             "Server listen address.",
         ),
         schema(

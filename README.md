@@ -61,10 +61,16 @@ https://<subdomain>.<domain>
 ./target/release/http-tunnel-server
 ```
 
+如需使用非特权端口运行：
+
+```bash
+./target/release/http-tunnel-server serve --port 8080
+```
+
 首次启动后打开：
 
 ```text
-http://<server>:8080/admin/setup
+http://<server>/admin/setup
 ```
 
 完成管理员密码、域名、公网协议、监听地址、数据库地址等初始化配置。
@@ -114,9 +120,9 @@ cargo test --workspace
 基础 smoke：
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/health
-curl http://127.0.0.1:8080/api/v1/ready
-curl -H 'Host: demo.example.com' http://127.0.0.1:8080/
+curl http://127.0.0.1/api/v1/health
+curl http://127.0.0.1/api/v1/ready
+curl -H 'Host: demo.example.com' http://127.0.0.1/
 ```
 
 长时间 reconnect / HTTP / SSE / WebSocket 行为可以手动运行被忽略的非 UI smoke-soak harness：

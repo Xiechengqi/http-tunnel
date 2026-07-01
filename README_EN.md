@@ -57,10 +57,16 @@ Start the server:
 ./target/release/http-tunnel-server
 ```
 
+Use a non-privileged port when needed:
+
+```bash
+./target/release/http-tunnel-server serve --port 8080
+```
+
 Open first-time setup:
 
 ```text
-http://<server>:8080/admin/setup
+http://<server>/admin/setup
 ```
 
 Set the admin password, domain, public scheme, listen address, database URL, and other runtime settings.
@@ -110,9 +116,9 @@ cargo test --workspace
 Basic smoke:
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/health
-curl http://127.0.0.1:8080/api/v1/ready
-curl -H 'Host: demo.example.com' http://127.0.0.1:8080/
+curl http://127.0.0.1/api/v1/health
+curl http://127.0.0.1/api/v1/ready
+curl -H 'Host: demo.example.com' http://127.0.0.1/
 ```
 
 Run the ignored non-UI smoke-soak harness manually for longer reconnect / HTTP / SSE / WebSocket coverage:

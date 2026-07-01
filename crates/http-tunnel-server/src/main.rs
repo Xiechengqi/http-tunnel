@@ -26,11 +26,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Serve { config: None }) {
-        Command::Serve { config } => {
+    match cli.command.unwrap_or(Command::Serve {
+        config: None,
+        port: None,
+    }) {
+        Command::Serve { config, port } => {
             let config_path = config_path(config);
-            let cfg = ServerConfig::load(&config_path)
+            let mut cfg = ServerConfig::load(&config_path)
                 .with_context(|| format!("load config from {config_path}"))?;
+            if let Some(port) = port {
+                cfg.addr.set_port(port);
+            }
             app::serve(config_path, cfg).await
         }
         Command::Backup { config, output } => {

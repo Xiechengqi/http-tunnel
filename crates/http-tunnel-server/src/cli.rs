@@ -17,6 +17,8 @@ pub enum Command {
     Serve {
         #[arg(long, env = "HTTP_TUNNEL_CONFIG")]
         config: Option<String>,
+        #[arg(long, env = "HTTP_TUNNEL_PORT")]
+        port: Option<u16>,
     },
     Backup {
         #[arg(long, env = "HTTP_TUNNEL_CONFIG")]

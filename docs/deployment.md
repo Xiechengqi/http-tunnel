@@ -72,10 +72,10 @@ For aggregate checksum files, include the matching server asset filename on the 
 Smoke test after deployment:
 
 ```bash
-curl http://127.0.0.1:8080/api/v1/health
-curl http://127.0.0.1:8080/api/v1/ready
-http-tunnel-client connect --server http://127.0.0.1:8080 --subdomain demo --target http://127.0.0.1:3000
-curl -H 'Host: demo.example.com' http://127.0.0.1:8080/
+curl http://127.0.0.1/api/v1/health
+curl http://127.0.0.1/api/v1/ready
+http-tunnel-client connect --server http://127.0.0.1 --subdomain demo --target http://127.0.0.1:3000
+curl -H 'Host: demo.example.com' http://127.0.0.1/
 ```
 
 For Prometheus scraping, keep `metrics_public = false` unless the endpoint is already protected by the deployment boundary. Prefer scraping from a trusted peer IP or using the dedicated metrics bearer token.
