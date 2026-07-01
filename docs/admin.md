@@ -143,6 +143,7 @@ Maintenance endpoints report the live SQLite database path, DB/WAL/SHM sizes, ta
 Backup and restore:
 
 ```bash
+http-tunnel-server version
 http-tunnel-server backup --output "$HOME/.http-tunnel/backup.zip"
 http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip" --dry-run
 http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip"

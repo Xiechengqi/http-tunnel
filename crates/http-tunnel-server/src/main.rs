@@ -12,7 +12,7 @@ mod state;
 use anyhow::Context;
 use clap::Parser;
 use cli::{Cli, Command};
-use http_tunnel_common::{config::config_path, ServerConfig};
+use http_tunnel_common::{build_info::BuildInfo, config::config_path, ServerConfig};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -57,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
             let report =
                 backup::restore_backup_file(&backup, std::path::Path::new(&config_path), dry_run)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::Version => {
+            println!("{}", serde_json::to_string_pretty(&BuildInfo::current())?);
             Ok(())
         }
     }

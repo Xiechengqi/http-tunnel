@@ -20,6 +20,7 @@ writeFileSync(
     {
       version: process.env.HTTP_TUNNEL_VERSION || "0.1.0",
       commit: process.env.HTTP_TUNNEL_COMMIT || "unknown",
+      commitMessage: process.env.HTTP_TUNNEL_COMMIT_MESSAGE || "unknown",
       buildTime: process.env.HTTP_TUNNEL_BUILD_TIME || new Date().toISOString(),
     },
     null,

@@ -15,6 +15,7 @@ use config::{
 };
 use connect::{connect, release_tunnel};
 use doctor::run_doctor;
+use http_tunnel_common::build_info::BuildInfo;
 use runtime::{clean_runtime, read_status, request_disconnect};
 use std::time::{Duration, Instant};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Version => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            println!("{}", serde_json::to_string_pretty(&BuildInfo::current())?);
         }
         Command::Config {
             command: ConfigCommand::Init,

@@ -75,6 +75,7 @@ http-tunnel-client status --watch
 http-tunnel-client disconnect
 http-tunnel-client disconnect --timeout 10
 http-tunnel-client runtime clean
+http-tunnel-client version
 ```
 
 `status` prints `$HOME/.http-tunnel/runtime.json` as JSON. It includes PID, server, target, tunnel ID, public URL, connected state, stale PID detection, active stream count, byte counters, last disconnect reason, and update time. `--watch` repeats the status output at the requested interval. `disconnect` writes a local stop flag at `$HOME/.http-tunnel/disconnect` and waits up to the timeout for the running client to exit gracefully without a local daemon socket. `runtime clean` removes stale runtime status and disconnect flag files; it refuses to clean an apparently live client unless `--force` is supplied.

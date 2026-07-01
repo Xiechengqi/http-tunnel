@@ -34,4 +34,5 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    Version,
 }
