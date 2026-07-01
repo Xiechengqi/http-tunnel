@@ -1,4 +1,5 @@
 use anyhow::Context;
+use http_tunnel_common::config::default_client_config_path;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -72,10 +73,7 @@ pub fn clear_stored_tunnel_on_endpoint_override(
 }
 
 pub fn default_config_path() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .map(|home| home.join(".config/http-tunnel/client.toml"))
-        .unwrap_or_else(|| std::path::PathBuf::from("client.toml"))
+    default_client_config_path()
 }
 
 fn parse_client_config(raw: &str) -> anyhow::Result<ClientConfig> {

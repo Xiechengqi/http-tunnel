@@ -17,6 +17,7 @@ pub struct SetupStatus {
     pub has_domain: bool,
     pub has_public_scheme: bool,
     pub has_database_url: bool,
+    pub database_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,5 +122,6 @@ fn setup_status(cfg: &ServerConfig) -> SetupStatus {
         has_domain: cfg.domain.as_deref().is_some_and(|s| !s.is_empty()),
         has_public_scheme: !cfg.public_scheme.is_empty(),
         has_database_url: !cfg.database_url.is_empty(),
+        database_url: cfg.database_url.clone(),
     }
 }

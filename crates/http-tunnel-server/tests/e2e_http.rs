@@ -88,21 +88,21 @@ fn dashboard_admin_static_has_policy_form_and_no_prompt_editors() {
 
 #[test]
 fn initial_schema_declares_request_log_and_session_indexes() {
-    let migration = std::fs::read_to_string(workspace_root().join("migrations/0001_init.sql"))
-        .expect("read init migration");
+    let schema = std::fs::read_to_string(workspace_root().join("schema/initial.sql"))
+        .expect("read initial schema");
     for index in [
         "idx_request_logs_tunnel_started",
         "idx_request_logs_error_started",
         "idx_request_logs_status_started",
         "idx_sessions_tunnel_connected",
     ] {
-        assert!(migration.contains(index), "missing {index}");
+        assert!(schema.contains(index), "missing {index}");
     }
-    assert!(migration.contains("schema_migrations"));
+    assert!(schema.contains("schema_versions"));
     let db_rs =
         std::fs::read_to_string(workspace_root().join("crates/http-tunnel-server/src/db.rs"))
             .expect("read db module");
-    assert!(db_rs.contains("0001_init"));
+    assert!(db_rs.contains("schema/initial.sql"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -514,14 +514,14 @@ async fn tunnel_lifecycle_errors_are_reported() {
     let server = TestServer::start(&workspace, &test_dir, server_port).await;
     server.setup().await;
     let pool = server_db(&server).await;
-    let migrations = sqlx::query("SELECT version FROM schema_migrations ORDER BY version")
+    let schema_versions = sqlx::query("SELECT version FROM schema_versions ORDER BY version")
         .fetch_all(&pool)
         .await
         .unwrap()
         .into_iter()
         .map(|row| row.get::<String, _>("version"))
         .collect::<Vec<_>>();
-    assert_eq!(migrations, vec!["0001_init".to_string()]);
+    assert_eq!(schema_versions, vec!["initial".to_string()]);
 
     let http = reqwest::Client::new();
     let created = create_tunnel(&http, server_port, "demo").await;
@@ -634,7 +634,7 @@ async fn client_release_deletes_stored_tunnel_and_clears_local_token() {
     let test_dir = unique_test_dir("client-release");
     let client_home = unique_test_dir("client-release-home");
     std::fs::create_dir_all(&test_dir).unwrap();
-    std::fs::create_dir_all(client_home.join(".config/http-tunnel")).unwrap();
+    std::fs::create_dir_all(client_home.join(".http-tunnel")).unwrap();
 
     let server = TestServer::start(&workspace, &test_dir, server_port).await;
     server.setup().await;
@@ -643,7 +643,7 @@ async fn client_release_deletes_stored_tunnel_and_clears_local_token() {
     let created = create_tunnel(&http, server_port, "release").await;
     let tunnel_id = created["data"]["id"].as_str().unwrap();
     let tunnel_token = created["data"]["token"].as_str().unwrap();
-    let config_path = client_home.join(".config/http-tunnel/client.toml");
+    let config_path = client_home.join(".http-tunnel/client.toml");
     std::fs::write(
         &config_path,
         format!(
@@ -685,7 +685,7 @@ async fn client_status_and_disconnect_control_runtime() {
     let test_dir = unique_test_dir("client-runtime-control");
     let client_home = unique_test_dir("client-runtime-control-home");
     std::fs::create_dir_all(&test_dir).unwrap();
-    std::fs::create_dir_all(client_home.join(".config/http-tunnel")).unwrap();
+    std::fs::create_dir_all(client_home.join(".http-tunnel")).unwrap();
 
     let _target = start_target(target_port).await;
     let server = TestServer::start(&workspace, &test_dir, server_port).await;
@@ -761,7 +761,7 @@ async fn client_json_events_stdout_is_ndjson_only() {
     let test_dir = unique_test_dir("client-json-events");
     let client_home = unique_test_dir("client-json-events-home");
     std::fs::create_dir_all(&test_dir).unwrap();
-    std::fs::create_dir_all(client_home.join(".config/http-tunnel")).unwrap();
+    std::fs::create_dir_all(client_home.join(".http-tunnel")).unwrap();
 
     let _target = start_target(target_port).await;
     let server = TestServer::start(&workspace, &test_dir, server_port).await;
@@ -831,7 +831,7 @@ async fn client_json_events_stdout_is_ndjson_only() {
 fn client_status_marks_missing_runtime_pid_as_stale() {
     let workspace = workspace_root();
     let client_home = unique_test_dir("client-runtime-stale-home");
-    let runtime_dir = client_home.join(".config/http-tunnel");
+    let runtime_dir = client_home.join(".http-tunnel");
     std::fs::create_dir_all(&runtime_dir).unwrap();
     std::fs::write(
         runtime_dir.join("runtime.json"),
@@ -2473,7 +2473,7 @@ async fn client_doctor_reports_protocol_stored_tunnel_and_websocket_target() {
     let test_dir = unique_test_dir("doctor-enhanced");
     let client_home = unique_test_dir("doctor-enhanced-home");
     std::fs::create_dir_all(&test_dir).unwrap();
-    std::fs::create_dir_all(client_home.join(".config/http-tunnel")).unwrap();
+    std::fs::create_dir_all(client_home.join(".http-tunnel")).unwrap();
 
     let _target = start_target(target_port).await;
     let server = TestServer::start(&workspace, &test_dir, server_port).await;
@@ -2482,7 +2482,7 @@ async fn client_doctor_reports_protocol_stored_tunnel_and_websocket_target() {
     let http = reqwest::Client::new();
     let created = create_tunnel(&http, server_port, "doctorx").await;
     std::fs::write(
-        client_home.join(".config/http-tunnel/client.toml"),
+        client_home.join(".http-tunnel/client.toml"),
         format!(
             "server = \"http://127.0.0.1:{server_port}\"\ntarget = \"http://127.0.0.1:{target_port}\"\nsubdomain = \"doctorx\"\ntunnel_id = \"{}\"\ntoken = \"{}\"\npersist_token = true\n",
             created["data"]["id"].as_str().unwrap(),

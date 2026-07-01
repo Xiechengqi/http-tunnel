@@ -140,14 +140,14 @@ Maintenance endpoints report the live SQLite database path, DB/WAL/SHM sizes, ta
 Backup and restore:
 
 ```bash
-http-tunnel-server backup --config ./data/server.toml --output ./data/backup.zip
-http-tunnel-server restore --backup ./data/backup.zip --dry-run
-http-tunnel-server restore --config ./data/server.toml --backup ./data/backup.zip
+http-tunnel-server backup --output "$HOME/.http-tunnel/backup.zip"
+http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip" --dry-run
+http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip"
 ```
 
 The backup archive includes `manifest.json`, `config/server.toml`, the SQLite database plus WAL/SHM files when present, and build info. The admin API `POST /api/admin/backup` returns the same ZIP format. `POST /api/admin/restore/validate` accepts `{"path":"..."}` and returns `validation` plus a dry-run `restore_plan` with target config/database paths, companion WAL/SHM paths, overwritten files, stale companion files that would be removed, and restore warnings. Actual restore is intentionally a CLI/offline operation: stop the server first, run `restore`, then start the binary again. Existing target files are copied to `.restore-bak` paths before replacement.
 
-The database records applied schema versions in `schema_migrations`; current fresh installs record `0001_init`.
+The database records applied schema versions in `schema_versions`; current fresh installs record `initial`.
 
 The admin dashboard is organized into Overview, Tunnels, Activity, Security, Config, Maintenance, and Version tabs. It can manage runtime config, apply local schema-based validation before save, view schema metadata, copy or download diagnostics, view alerts, filter/paginate tunnels and logs, export request/audit CSV files for the current page or filtered result set, inspect tunnel detail, toggle Inspector, edit tunnel access/rules with a form, view audit logs, manage admin sessions, rotate tunnel tokens, rotate or clear secret-backed config values, extend/expire/enable/disable/disconnect/delete tunnels, run cleanup and DB maintenance, download backups, validate backup archives, change the admin password, validate upgrade settings, and request restart/upgrade. Request logs show request ID, type, method, path, host, remote IP, user agent, status, duration, byte counts, errors, replay lineage, WebSocket close/message metadata, and optional Inspector previews.
 

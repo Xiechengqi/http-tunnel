@@ -52,7 +52,7 @@ Build the binaries:
 Start the server:
 
 ```bash
-./target/release/http-tunnel-server serve --config ./data/server.toml
+./target/release/http-tunnel-server serve
 ```
 
 Open first-time setup:
@@ -135,7 +135,7 @@ The admin dashboard is available at `/admin`; first-time setup is at `/admin/set
 
 ## Key Configuration
 
-Common settings live in `server.toml` and can also be overridden by environment variables. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
+By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
 
 | Area | Settings |
 | --- | --- |
@@ -156,4 +156,3 @@ Common settings live in `server.toml` and can also be overridden by environment 
 - [Troubleshooting](docs/troubleshooting.md)
 - [Release checklist](docs/release-checklist.md)
 - [Production hardening](docs/production-hardening.md)
-

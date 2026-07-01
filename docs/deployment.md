@@ -4,10 +4,12 @@ Build and run:
 
 ```bash
 ./build.sh
-./target/release/http-tunnel-server serve --config ./data/server.toml
+./target/release/http-tunnel-server serve
 ```
 
 The supported runtime artifact is the binary itself. This project does not publish or document a container runtime path.
+
+Without `--config`, the server uses `$HOME/.http-tunnel/server.toml`, `sqlite://$HOME/.http-tunnel/http-tunnel.sqlite3`, and `$HOME/.http-tunnel` for local data. Pass `--config` or set `HTTP_TUNNEL_CONFIG` only when a deployment needs a different location.
 
 The server owns setup, admin, public API, tunnel WebSocket, and subdomain proxy traffic on one HTTP listener.
 
@@ -19,7 +21,8 @@ Description=http-tunnel server
 After=network-online.target
 
 [Service]
-ExecStart=/opt/http-tunnel/http-tunnel-server serve --config /opt/http-tunnel/data/server.toml
+Environment=HOME=/opt/http-tunnel
+ExecStart=/opt/http-tunnel/http-tunnel-server serve
 WorkingDirectory=/opt/http-tunnel
 Restart=always
 RestartSec=3
@@ -44,8 +47,8 @@ Offline restore:
 
 ```bash
 systemctl stop http-tunnel.service
-./http-tunnel-server restore --config ./data/server.toml --backup ./data/backup.zip --dry-run
-./http-tunnel-server restore --config ./data/server.toml --backup ./data/backup.zip
+./http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip" --dry-run
+./http-tunnel-server restore --backup "$HOME/.http-tunnel/backup.zip"
 systemctl start http-tunnel.service
 ```
 

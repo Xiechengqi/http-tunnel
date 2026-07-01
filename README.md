@@ -52,7 +52,7 @@ https://<subdomain>.<domain>
 启动 server：
 
 ```bash
-./target/release/http-tunnel-server serve --config ./data/server.toml
+./target/release/http-tunnel-server serve
 ```
 
 首次启动后打开：
@@ -135,7 +135,7 @@ cargo test -p http-tunnel-server --test e2e_http \
 
 ## 关键配置
 
-常见配置项会保存到 `server.toml`，也可通过环境变量覆盖。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
+默认情况下，server 配置、SQLite 数据库和本地数据文件会保存在 `$HOME/.http-tunnel`，client 配置和运行态文件也使用同一个目录。常见配置项会保存到 `$HOME/.http-tunnel/server.toml`，也可通过命令行参数或环境变量覆盖。更完整的字段说明见 [Admin 文档](docs/admin.md) 和 [Security 文档](docs/security.md)。
 
 | 领域 | 配置 |
 | --- | --- |
@@ -156,4 +156,3 @@ cargo test -p http-tunnel-server --test e2e_http \
 - [故障排查](docs/troubleshooting.md)
 - [发布检查清单](docs/release-checklist.md)
 - [生产加固](docs/production-hardening.md)
-

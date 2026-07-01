@@ -5,8 +5,8 @@ use sqlx::{
 };
 use std::{path::Path, str::FromStr};
 
-const INIT_SQL: &str = include_str!("../../../migrations/0001_init.sql");
-const INIT_MIGRATION_VERSION: &str = "0001_init";
+const INIT_SQL: &str = include_str!("../../../schema/initial.sql");
+const INIT_SCHEMA_VERSION: &str = "initial";
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
     ensure_sqlite_parent(database_url)?;
@@ -28,23 +28,23 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
     sqlx::query("PRAGMA busy_timeout=5000")
         .execute(&pool)
         .await?;
-    run_migrations(&pool).await?;
+    initialize_schema(&pool).await?;
     cleanup_startup_state(&pool).await?;
     Ok(pool)
 }
 
-async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
-    ensure_migrations_table(pool).await?;
-    if !migration_applied(pool, INIT_MIGRATION_VERSION).await? {
+async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    ensure_schema_versions_table(pool).await?;
+    if !schema_version_applied(pool, INIT_SCHEMA_VERSION).await? {
         sqlx::query(INIT_SQL).execute(pool).await?;
-        record_migration(pool, INIT_MIGRATION_VERSION).await?;
+        record_schema_version(pool, INIT_SCHEMA_VERSION).await?;
     }
     Ok(())
 }
 
-async fn ensure_migrations_table(pool: &SqlitePool) -> anyhow::Result<()> {
+async fn ensure_schema_versions_table(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS schema_migrations ( \
+        "CREATE TABLE IF NOT EXISTS schema_versions ( \
          version TEXT PRIMARY KEY, \
          applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP \
          )",
@@ -54,8 +54,8 @@ async fn ensure_migrations_table(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn migration_applied(pool: &SqlitePool, version: &str) -> anyhow::Result<bool> {
-    let count = sqlx::query("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = ?1")
+async fn schema_version_applied(pool: &SqlitePool, version: &str) -> anyhow::Result<bool> {
+    let count = sqlx::query("SELECT COUNT(*) AS count FROM schema_versions WHERE version = ?1")
         .bind(version)
         .fetch_one(pool)
         .await?
@@ -63,8 +63,8 @@ async fn migration_applied(pool: &SqlitePool, version: &str) -> anyhow::Result<b
     Ok(count > 0)
 }
 
-async fn record_migration(pool: &SqlitePool, version: &str) -> anyhow::Result<()> {
-    sqlx::query("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?1)")
+async fn record_schema_version(pool: &SqlitePool, version: &str) -> anyhow::Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO schema_versions (version) VALUES (?1)")
         .bind(version)
         .execute(pool)
         .await?;

@@ -1,6 +1,10 @@
 use crate::{CommonError, Result};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, net::SocketAddr, path::Path};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -60,8 +64,8 @@ impl Default for ServerConfig {
             addr: "0.0.0.0:8080".parse().expect("valid default addr"),
             trust_proxy_headers: true,
             trusted_proxy_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
-            database_url: "sqlite://./data/http-tunnel.sqlite3".to_string(),
-            data_dir: "./data".to_string(),
+            database_url: default_database_url(),
+            data_dir: default_data_dir(),
             tunnel_ttl_seconds: 86_400,
             reserved_ttl_seconds: 300,
             max_body_bytes: 25 * 1024 * 1024,
@@ -331,5 +335,79 @@ fn parse_bool(name: &str, value: &str) -> Result<bool> {
 pub fn config_path(cli_path: Option<String>) -> String {
     cli_path
         .or_else(|| env::var("HTTP_TUNNEL_CONFIG").ok())
-        .unwrap_or_else(|| "./data/server.toml".to_string())
+        .unwrap_or_else(|| default_server_config_path().display().to_string())
+}
+
+pub fn default_home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".http-tunnel"))
+        .unwrap_or_else(|| PathBuf::from(".http-tunnel"))
+}
+
+pub fn default_server_config_path() -> PathBuf {
+    default_home_dir().join("server.toml")
+}
+
+pub fn default_client_config_path() -> PathBuf {
+    default_home_dir().join("client.toml")
+}
+
+pub fn default_database_url() -> String {
+    format!(
+        "sqlite://{}",
+        default_home_dir().join("http-tunnel.sqlite3").display()
+    )
+}
+
+pub fn default_data_dir() -> String {
+    default_home_dir().display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn default_paths_live_under_home_http_tunnel() {
+        let _guard = env_lock().lock().unwrap();
+        let original_home = env::var_os("HOME");
+        unsafe {
+            env::set_var("HOME", "/tmp/http-tunnel-home-test");
+        }
+
+        assert_eq!(
+            default_server_config_path(),
+            PathBuf::from("/tmp/http-tunnel-home-test/.http-tunnel/server.toml")
+        );
+        assert_eq!(
+            default_client_config_path(),
+            PathBuf::from("/tmp/http-tunnel-home-test/.http-tunnel/client.toml")
+        );
+        assert_eq!(
+            default_database_url(),
+            "sqlite:///tmp/http-tunnel-home-test/.http-tunnel/http-tunnel.sqlite3"
+        );
+        assert_eq!(
+            ServerConfig::default().data_dir,
+            "/tmp/http-tunnel-home-test/.http-tunnel"
+        );
+
+        unsafe {
+            match original_home {
+                Some(home) => env::set_var("HOME", home),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
 }

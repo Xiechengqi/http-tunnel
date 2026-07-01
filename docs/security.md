@@ -30,7 +30,7 @@ Set `HTTP_TUNNEL_TRUSTED_PROXY_CIDRS` to a comma-separated CIDR list when the se
 Tunnel tokens are stored hashed on the server. The client can persist tunnel credentials in:
 
 ```text
-$HOME/.config/http-tunnel/client.toml
+$HOME/.http-tunnel/client.toml
 ```
 
 Set `persist_token = false` or run with `--no-persist-token` to avoid writing `tunnel_id`, `token`, and `url` to disk.

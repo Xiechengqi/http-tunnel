@@ -3,6 +3,7 @@ use crate::net::cidr_is_valid;
 use axum::{extract::connect_info::ConnectInfo, extract::State, http::HeaderMap, Json};
 use http_tunnel_common::{
     api::ApiResponse,
+    config::{default_data_dir, default_database_url},
     token::{generate_token, hash_token},
     ServerConfig,
 };
@@ -139,7 +140,7 @@ pub struct ConfigFieldSchema {
     pub required: bool,
     pub restart_required: bool,
     pub hot_reloadable: bool,
-    pub default: &'static str,
+    pub default: String,
     pub allowed_values: &'static [&'static str],
     pub min: Option<i64>,
     pub max: Option<i64>,
@@ -578,7 +579,7 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "HTTP_TUNNEL_DATABASE_URL",
             false,
             true,
-            "sqlite://./data/http-tunnel.sqlite3",
+            default_database_url(),
             "SQLite database URL.",
         ),
         schema(
@@ -587,7 +588,7 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "HTTP_TUNNEL_DATA_DIR",
             false,
             true,
-            "./data",
+            default_data_dir(),
             "Directory used for local runtime data and backups.",
         ),
         schema(
@@ -914,7 +915,7 @@ fn schema(
     env: &'static str,
     secret: bool,
     restart_required: bool,
-    default: &'static str,
+    default: impl Into<String>,
     description: &'static str,
 ) -> ConfigFieldSchema {
     let metadata = config_field_metadata(key);
@@ -927,7 +928,7 @@ fn schema(
         required: metadata.required,
         restart_required,
         hot_reloadable: !restart_required,
-        default,
+        default: default.into(),
         allowed_values: metadata.allowed_values,
         min: metadata.min,
         max: metadata.max,

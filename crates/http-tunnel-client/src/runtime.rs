@@ -1,4 +1,5 @@
 use anyhow::Context;
+use http_tunnel_common::config::default_home_dir;
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
@@ -154,10 +155,7 @@ fn disconnect_flag_path() -> PathBuf {
 }
 
 fn runtime_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".config/http-tunnel"))
-        .unwrap_or_else(|| PathBuf::from("."))
+    default_home_dir()
 }
 
 fn unix_now() -> u64 {

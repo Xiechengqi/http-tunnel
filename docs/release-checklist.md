@@ -22,7 +22,7 @@ These names must match the server upgrade resolver. Accepted checksum names are 
 
 Deployment smoke:
 
-- Start `http-tunnel-server serve --config ./data/server.toml`.
+- Start `http-tunnel-server serve` and confirm defaults are created under `$HOME/.http-tunnel`.
 - Complete `/admin/setup`.
 - Verify `/api/v1/ready` returns ready after setup and database initialization.
 - Log in at `/admin/login`.
