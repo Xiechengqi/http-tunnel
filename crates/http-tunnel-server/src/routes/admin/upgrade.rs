@@ -115,7 +115,7 @@ pub async fn restart(
 ) -> Result<Json<ApiResponse<RestartResponse>>> {
     let actor = require_admin_write(&state, &headers).await?;
     let cfg = state.config.read().await.clone();
-    let restart = request_restart(cfg.systemd_unit.as_deref())?;
+    let restart = request_restart(cfg.systemd_unit.as_deref(), None)?;
     set_pending_restart(&state, false).await?;
     add_audit_event(&state, "admin_restart_requested", restart.method).await?;
     record_admin_audit(
@@ -500,7 +500,10 @@ async fn install_upgrade_candidate(
     )
     .await?;
     emit_upgrade_event(state, "restarting", "requesting service restart");
-    let restart = request_restart(cfg.systemd_unit.as_deref())?;
+    let restart = request_restart(
+        cfg.systemd_unit.as_deref(),
+        Some(candidate.current_exe.as_path()),
+    )?;
     add_audit_event(state, restart_event, restart.method).await?;
     emit_upgrade_event(state, "complete", &restart.message);
     Ok(UpgradeResponse {
@@ -811,14 +814,16 @@ fn valid_sha256_hex(value: &str) -> bool {
 }
 
 fn make_executable(path: &Path) -> Result<()> {
+    make_executable_file(path).map_err(AppError::internal)
+}
+
+fn make_executable_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)
-            .map_err(AppError::internal)?
-            .permissions();
+        let mut permissions = fs::metadata(path)?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).map_err(AppError::internal)?;
+        fs::set_permissions(path, permissions)?;
     }
     Ok(())
 }
@@ -856,12 +861,35 @@ fn replace_binary_files(
     current_exe: &Path,
     backup: &Path,
 ) -> std::io::Result<()> {
+    let staging = staging_upgrade_path(current_exe)?;
+    let _ = fs::remove_file(&staging);
     fs::copy(current_exe, backup)?;
-    if let Err(error) = fs::copy(new_binary, current_exe) {
-        let _ = fs::copy(backup, current_exe);
+    if let Err(error) = fs::copy(new_binary, &staging)
+        .and_then(|_| make_executable_file(&staging))
+        .and_then(|_| fs::rename(&staging, current_exe))
+    {
+        let _ = fs::remove_file(&staging);
         return Err(error);
     }
     Ok(())
+}
+
+fn staging_upgrade_path(current_exe: &Path) -> std::io::Result<PathBuf> {
+    let parent = current_exe.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "current executable path has no parent directory",
+        )
+    })?;
+    let file_name = current_exe.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "current executable path has no file name",
+        )
+    })?;
+    let mut staging_name = file_name.to_os_string();
+    staging_name.push(format!(".upgrade-{}", std::process::id()));
+    Ok(parent.join(staging_name))
 }
 
 struct RestartRequest {
@@ -870,7 +898,7 @@ struct RestartRequest {
     message: String,
 }
 
-fn request_restart(unit: Option<&str>) -> Result<RestartRequest> {
+fn request_restart(unit: Option<&str>, exec_path: Option<&Path>) -> Result<RestartRequest> {
     let mut failures = Vec::new();
     if let Some(unit) = unit.filter(|unit| !unit.trim().is_empty()) {
         if command_available("systemd-run") {
@@ -899,7 +927,7 @@ fn request_restart(unit: Option<&str>) -> Result<RestartRequest> {
         }
     }
     if exec_restart_supported() {
-        schedule_exec_restart()?;
+        schedule_exec_restart(exec_path)?;
         let detail = if failures.is_empty() {
             "exec restart scheduled with current process arguments".to_string()
         } else {
@@ -1068,8 +1096,11 @@ fn exec_restart_supported() -> bool {
 }
 
 #[cfg(unix)]
-fn schedule_exec_restart() -> Result<()> {
-    let current_exe = std::env::current_exe().map_err(AppError::internal)?;
+fn schedule_exec_restart(exec_path: Option<&Path>) -> Result<()> {
+    let current_exe = match exec_path {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_exe().map_err(AppError::internal)?,
+    };
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(350));
@@ -1081,7 +1112,7 @@ fn schedule_exec_restart() -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn schedule_exec_restart() -> Result<()> {
+fn schedule_exec_restart(_exec_path: Option<&Path>) -> Result<()> {
     Err(AppError::new(
         StatusCode::BAD_GATEWAY,
         "restart_not_supported",
