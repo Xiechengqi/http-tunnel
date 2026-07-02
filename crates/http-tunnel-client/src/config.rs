@@ -12,6 +12,7 @@ pub struct ClientConfig {
     pub token: Option<String>,
     pub url: Option<String>,
     pub create_token: Option<String>,
+    pub ttl_seconds: Option<u64>,
     pub persist_token: Option<bool>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -102,6 +103,17 @@ pub fn clear_stored_tunnel_on_endpoint_override(
     }
 }
 
+pub fn clear_stored_tunnel_on_ttl_override(
+    cfg: &mut ClientConfig,
+    explicit_ttl_seconds: bool,
+    old_ttl_seconds: Option<u64>,
+    ttl_seconds: Option<u64>,
+) {
+    if explicit_ttl_seconds && old_ttl_seconds != ttl_seconds {
+        clear_stored_tunnel(cfg);
+    }
+}
+
 pub fn default_config_path() -> std::path::PathBuf {
     default_client_config_path()
 }
@@ -125,6 +137,7 @@ tunnel_id = "tun_123"
 token = "secret"
 url = "https://demo.example.com"
 create_token = "create-secret"
+ttl_seconds = 3600
 persist_token = false
 client_id = "cli_123"
 client_secret = "client-secret"
@@ -140,6 +153,7 @@ public_ip_refresh_seconds = 3600
         assert_eq!(cfg.token.as_deref(), Some("secret"));
         assert_eq!(cfg.url.as_deref(), Some("https://demo.example.com"));
         assert_eq!(cfg.create_token.as_deref(), Some("create-secret"));
+        assert_eq!(cfg.ttl_seconds, Some(3600));
         assert_eq!(cfg.persist_token, Some(false));
         assert_eq!(cfg.client_id.as_deref(), Some("cli_123"));
         assert_eq!(cfg.client_secret.as_deref(), Some("client-secret"));
@@ -189,6 +203,23 @@ public_ip_refresh_seconds = 3600
             Some("old"),
             Some("old"),
         );
+
+        assert!(cfg.tunnel_id.is_none());
+        assert!(cfg.token.is_none());
+        assert!(cfg.url.is_none());
+    }
+
+    #[test]
+    fn ttl_override_clears_stored_tunnel() {
+        let mut cfg = ClientConfig {
+            ttl_seconds: Some(3600),
+            tunnel_id: Some("tun_1".to_string()),
+            token: Some("secret".to_string()),
+            url: Some("https://demo.example.com".to_string()),
+            ..ClientConfig::default()
+        };
+
+        clear_stored_tunnel_on_ttl_override(&mut cfg, true, Some(3600), Some(7200));
 
         assert!(cfg.tunnel_id.is_none());
         assert!(cfg.token.is_none());

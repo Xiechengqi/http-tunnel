@@ -570,7 +570,10 @@ async fn tunnel_lifecycle_errors_are_reported() {
         .into_iter()
         .map(|row| row.get::<String, _>("version"))
         .collect::<Vec<_>>();
-    assert_eq!(schema_versions, vec!["initial".to_string()]);
+    assert_eq!(
+        schema_versions,
+        vec!["initial".to_string(), "tunnel_claims_v1".to_string()]
+    );
 
     let http = reqwest::Client::new();
     let created = create_tunnel(&http, server_port, "demo").await;
@@ -1340,7 +1343,7 @@ async fn creating_tunnel_cleans_disconnected_lifecycle_records() {
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE tunnels SET status = 'expired', disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
+        "UPDATE tunnels SET status = 'expired', client_ttl_seconds = NULL, disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
     )
     .bind(old_expired_id)
     .execute(&pool)
@@ -3145,6 +3148,8 @@ async fn admin_cleanup_uses_configured_retention_and_reports_counts() {
     let http = reqwest::Client::new();
     let created = create_tunnel(&http, server_port, "cleanup").await;
     let tunnel_id = created["data"]["id"].as_str().unwrap();
+    let ttl_created = create_tunnel(&http, server_port, "cleanup-ttl").await;
+    let ttl_tunnel_id = ttl_created["data"]["id"].as_str().unwrap();
     let pool = server_db(&server).await;
     sqlx::query(
         "INSERT INTO request_logs (id, tunnel_id, method, path, started_at, error) \
@@ -3178,9 +3183,16 @@ async fn admin_cleanup_uses_configured_retention_and_reports_counts() {
     .await
     .unwrap();
     sqlx::query(
-        "UPDATE tunnels SET status = 'expired', disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
+        "UPDATE tunnels SET status = 'expired', client_ttl_seconds = NULL, disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
     )
     .bind(tunnel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tunnels SET status = 'connected', client_ttl_seconds = 60, expires_at = datetime('now', '-1 second') WHERE id = ?1",
+    )
+    .bind(ttl_tunnel_id)
     .execute(&pool)
     .await
     .unwrap();
@@ -3205,12 +3217,24 @@ async fn admin_cleanup_uses_configured_retention_and_reports_counts() {
             .unwrap()
             >= 1
     );
+    assert!(
+        cleanup["data"]["deleted_client_ttl_tunnels"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
     let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
         .bind(tunnel_id)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(row.get::<String, _>("status"), "deleted");
+    let ttl_row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(ttl_tunnel_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ttl_row.get::<String, _>("status"), "deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

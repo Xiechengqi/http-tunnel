@@ -78,7 +78,8 @@ http-tunnel-client config init
 http-tunnel-client config set \
   --server https://example.com \
   --target http://127.0.0.1:3000 \
-  --subdomain demo
+  --subdomain demo \
+  --ttl-seconds 3600
 ```
 
 Start the tunnel:
@@ -93,8 +94,11 @@ CLI flags can override config values:
 http-tunnel-client connect \
   --server https://example.com \
   --subdomain demo \
-  --target http://127.0.0.1:3000
+  --target http://127.0.0.1:3000 \
+  --ttl-seconds 3600
 ```
+
+`--ttl-seconds` limits this tunnel exposure window. When it expires, the server deletes the tunnel and tells the client process to exit. Changing it through config or CLI clears the saved tunnel token and creates a fresh tunnel.
 
 Visit:
 

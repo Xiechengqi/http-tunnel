@@ -340,7 +340,10 @@ pub async fn create(
     let identity = client_identity_from_request(&req)?;
     let token = generate_token();
     let token_hash = hash_token(&token);
-    let ttl = req.ttl_seconds.unwrap_or(cfg.reserved_ttl_seconds).max(60);
+    let client_ttl_seconds = req.ttl_seconds.map(|ttl| ttl.max(60));
+    let ttl = client_ttl_seconds
+        .unwrap_or(cfg.reserved_ttl_seconds)
+        .max(60);
     let ttl_modifier = format!("+{ttl} seconds");
     let claim_modifier = create_claim_modifier(identity.as_ref(), ttl);
     let url = cfg.public_url(&subdomain).unwrap_or_default();
@@ -360,6 +363,7 @@ pub async fn create(
                 &create_ip,
                 user_agent.as_deref(),
                 identity.as_ref(),
+                client_ttl_seconds,
                 &claim_modifier,
             )
             .await?;
@@ -386,8 +390,8 @@ pub async fn create(
     );
 
     let result = sqlx::query(
-        "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, claim_expires_at, inspector_enabled) \
-         VALUES (?1, ?2, ?3, 'reserved', datetime('now', ?4), ?5, ?6, ?7, ?8, datetime('now', ?9), ?10)",
+        "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, client_ttl_seconds, claim_expires_at, inspector_enabled) \
+         VALUES (?1, ?2, ?3, 'reserved', datetime('now', ?4), ?5, ?6, ?7, ?8, ?9, datetime('now', ?10), ?11)",
     )
     .bind(&id)
     .bind(&subdomain)
@@ -397,6 +401,7 @@ pub async fn create(
     .bind(user_agent.as_deref())
     .bind(identity.as_ref().map(|identity| identity.id.as_str()))
     .bind(identity.as_ref().map(|identity| identity.secret_hash.as_str()))
+    .bind(client_ttl_seconds.map(|ttl| ttl as i64))
     .bind(&claim_modifier)
     .bind(cfg.inspector_enabled_default)
     .execute(&state.pool)
@@ -416,6 +421,7 @@ pub async fn create(
                         &create_ip,
                         user_agent.as_deref(),
                         identity.as_ref(),
+                        client_ttl_seconds,
                         &claim_modifier,
                     )
                     .await?;
@@ -458,6 +464,7 @@ async fn reclaim_existing_subdomain(
     create_ip: &str,
     user_agent: Option<&str>,
     identity: Option<&ClientIdentity>,
+    client_ttl_seconds: Option<u64>,
     claim_modifier: &str,
 ) -> Result<()> {
     sqlx::query(
@@ -466,8 +473,8 @@ async fn reclaim_existing_subdomain(
          connected_at = CASE WHEN status = 'connected' THEN connected_at ELSE NULL END, \
          disconnected_at = CASE WHEN status = 'connected' THEN disconnected_at ELSE NULL END, \
          expires_at = datetime('now', ?2), client_ip = ?3, client_user_agent = ?4, \
-         owner_client_id = ?5, owner_client_secret_hash = ?6, claim_expires_at = datetime('now', ?7) \
-         WHERE id = ?8",
+         owner_client_id = ?5, owner_client_secret_hash = ?6, client_ttl_seconds = ?7, claim_expires_at = datetime('now', ?8) \
+         WHERE id = ?9",
     )
     .bind(token_hash)
     .bind(ttl_modifier)
@@ -475,6 +482,7 @@ async fn reclaim_existing_subdomain(
     .bind(user_agent)
     .bind(identity.map(|identity| identity.id.as_str()))
     .bind(identity.map(|identity| identity.secret_hash.as_str()))
+    .bind(client_ttl_seconds.map(|ttl| ttl as i64))
     .bind(claim_modifier)
     .bind(&existing.id)
     .execute(pool)
@@ -776,7 +784,16 @@ async fn handle_socket(
                                     )
                                     .await
                                     {
-                                        HelloResult::Accepted => registered = true,
+                                        HelloResult::Accepted { client_ttl_seconds } => {
+                                            registered = true;
+                                            if let Some(ttl_seconds) = client_ttl_seconds {
+                                                crate::app::schedule_client_ttl_expiry(
+                                                    state.clone(),
+                                                    tunnel_id.clone(),
+                                                    ttl_seconds,
+                                                );
+                                            }
+                                        }
                                         HelloResult::Rejected(reason) => {
                                             disconnect_reason = reason;
                                             break;
@@ -907,7 +924,7 @@ async fn handle_socket(
 }
 
 enum HelloResult {
-    Accepted,
+    Accepted { client_ttl_seconds: Option<u64> },
     Rejected(&'static str),
 }
 
@@ -958,6 +975,14 @@ async fn handle_client_hello(
     };
     let capabilities = serde_json::to_string(&hello.capabilities).unwrap_or_else(|_| "[]".into());
     let cfg = state.config.read().await.clone();
+    let client_ttl_seconds = load_client_ttl_seconds(state, &session.tunnel_id).await;
+    let client_ttl_modifier = client_ttl_seconds.map(|ttl| format!("+{ttl} seconds"));
+    let connected_ttl_modifier = client_ttl_modifier
+        .clone()
+        .unwrap_or_else(|| format!("+{} seconds", cfg.tunnel_ttl_seconds));
+    let claim_modifier = client_ttl_modifier
+        .clone()
+        .unwrap_or_else(|| crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT.to_string());
     let resolved_source = resolve_client_source(hello.client_source.as_ref());
     let session_pool_policy = effective_session_pool_policy(&cfg);
     let registration = state
@@ -1028,8 +1053,8 @@ async fn handle_client_hello(
     .bind(resolved_source.country.as_deref())
     .bind(hello.client_version.as_deref())
     .bind(capabilities)
-    .bind(format!("+{} seconds", cfg.tunnel_ttl_seconds))
-    .bind(crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT)
+    .bind(&connected_ttl_modifier)
+    .bind(&claim_modifier)
     .execute(&state.pool)
     .await;
     if let Err(error) = &persist_session {
@@ -1076,7 +1101,26 @@ async fn handle_client_hello(
     )
     .await;
     let _ = send_hello_ack(&session.tx, true, None, reconnect_token).await;
-    HelloResult::Accepted
+    HelloResult::Accepted { client_ttl_seconds }
+}
+
+async fn load_client_ttl_seconds(state: &AppState, tunnel_id: &str) -> Option<u64> {
+    let result = sqlx::query("SELECT client_ttl_seconds FROM tunnels WHERE id = ?1")
+        .bind(tunnel_id)
+        .fetch_optional(&state.pool)
+        .await;
+    match result {
+        Ok(Some(row)) => row
+            .try_get::<Option<i64>, _>("client_ttl_seconds")
+            .ok()
+            .flatten()
+            .and_then(|value| u64::try_from(value).ok()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, %tunnel_id, "failed to load client ttl seconds");
+            None
+        }
+    }
 }
 
 async fn handle_client_source_update(

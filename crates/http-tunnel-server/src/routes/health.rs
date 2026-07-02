@@ -84,6 +84,7 @@ pub struct PublicTunnel {
     pub source: PublicTunnelSource,
     pub last_seen_at: Option<String>,
     pub expires_at: String,
+    pub client_ttl_seconds: Option<u64>,
     pub disconnected_at: Option<String>,
     pub claim_expires_at: Option<String>,
 }
@@ -214,7 +215,7 @@ async fn public_tunnels(
     runtime: &HashMap<String, RuntimeTunnelMetrics>,
 ) -> Vec<PublicTunnel> {
     let rows = sqlx::query(
-        "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.disconnected_at, \
+        "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.client_ttl_seconds, t.disconnected_at, \
                 t.claim_expires_at, t.client_ip, \
                 ls.remote_addr AS latest_remote_addr, ls.client_reported_ip AS latest_reported_ip, \
                 ls.client_country_code AS latest_country_code, \
@@ -317,6 +318,11 @@ async fn public_tunnels(
                     .ok()
                     .flatten(),
                 expires_at: row.get::<String, _>("expires_at"),
+                client_ttl_seconds: row
+                    .try_get::<Option<i64>, _>("client_ttl_seconds")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| u64::try_from(value).ok()),
                 disconnected_at: row
                     .try_get::<Option<String>, _>("disconnected_at")
                     .ok()

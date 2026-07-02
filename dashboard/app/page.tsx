@@ -815,6 +815,14 @@ function formatDate(value?: string | null) {
 function tunnelLifecycle(tunnel: PublicTunnel) {
   const status = tunnel.status.toLowerCase();
   if (tunnel.connected || status === "connected") {
+    if (tunnel.client_ttl_seconds) {
+      const expiresAt = parseDate(tunnel.expires_at);
+      return {
+        label: expiresAt ? `Deletes ${formatRelativeTime(expiresAt)}` : "Limited lifetime",
+        detail: expiresAt ? formatDateTime(expiresAt) : `${formatDuration(tunnel.client_ttl_seconds)} exposure limit`,
+        tone: "warning" as const,
+      };
+    }
     return {
       label: "While connected",
       detail: "No forced expiry",
@@ -880,6 +888,16 @@ function formatDateTime(date: Date) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatDuration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 function formatClock(value: Date) {

@@ -82,7 +82,8 @@ http-tunnel-client config init
 http-tunnel-client config set \
   --server https://example.com \
   --target http://127.0.0.1:3000 \
-  --subdomain demo
+  --subdomain demo \
+  --ttl-seconds 3600
 ```
 
 启动隧道：
@@ -97,8 +98,11 @@ http-tunnel-client connect
 http-tunnel-client connect \
   --server https://example.com \
   --subdomain demo \
-  --target http://127.0.0.1:3000
+  --target http://127.0.0.1:3000 \
+  --ttl-seconds 3600
 ```
+
+`--ttl-seconds` 用于限制本次 tunnel 暴露时长。到期后 server 会删除该 tunnel，并通知 client 进程退出；通过配置或命令行修改 TTL 会清除本地保存的 tunnel token，并重新创建 tunnel。
 
 访问：
 

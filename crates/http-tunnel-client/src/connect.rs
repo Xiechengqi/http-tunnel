@@ -67,6 +67,7 @@ const DEFAULT_PUBLIC_IP_LOOKUP_URLS: &[&str] = &[
 const DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATES: &[&str] =
     &["https://ipwho.is/{ip}", "https://api.country.is/{ip}"];
 const DUPLICATE_REPLACED_REASON: &str = "duplicate_replaced";
+const TUNNEL_EXPIRED_REASON: &str = "tunnel_expired";
 
 #[derive(Debug, Clone)]
 struct PublicIpLookup {
@@ -197,6 +198,7 @@ pub async fn connect(
             cfg.client_id.as_deref(),
             cfg.client_secret.as_deref(),
             cfg.create_token.as_deref(),
+            cfg.ttl_seconds,
         )
         .await?
     };
@@ -300,6 +302,34 @@ pub async fn connect(
                     }
                     break;
                 }
+                if tunnel_expired(&stats) {
+                    if json_events {
+                        emit_client_event(json_events, "disconnected", &stats)?;
+                        emit_client_event(
+                            json_events,
+                            "tunnel_expired",
+                            &serde_json::json!({
+                                "message": tunnel_expired_message(),
+                            }),
+                        )?;
+                    } else {
+                        println!(
+                            "disconnected; active_streams={} bytes_in={} bytes_out={} reason={}",
+                            stats.active_streams,
+                            stats.bytes_in,
+                            stats.bytes_out,
+                            stats.last_disconnect_reason.as_deref().unwrap_or("unknown"),
+                        );
+                        eprintln!("{}", tunnel_expired_message());
+                    }
+                    if cfg.tunnel_id.is_some() || cfg.token.is_some() || cfg.url.is_some() {
+                        clear_stored_tunnel(&mut cfg);
+                        if let Err(error) = save_config_file(&cfg) {
+                            eprintln!("failed to clear expired tunnel token: {error}");
+                        }
+                    }
+                    break;
+                }
                 if json_events {
                     emit_client_event(json_events, "disconnected", &stats)?;
                     emit_client_event(
@@ -336,6 +366,7 @@ pub async fn connect(
                         cfg.client_id.as_deref(),
                         cfg.client_secret.as_deref(),
                         cfg.create_token.as_deref(),
+                        cfg.ttl_seconds,
                     )
                     .await?;
                     if persist_token {
@@ -404,8 +435,16 @@ fn duplicate_replaced(stats: &ConnectionStats) -> bool {
     stats.last_disconnect_reason.as_deref() == Some(DUPLICATE_REPLACED_REASON)
 }
 
+fn tunnel_expired(stats: &ConnectionStats) -> bool {
+    stats.last_disconnect_reason.as_deref() == Some(TUNNEL_EXPIRED_REASON)
+}
+
 fn duplicate_replaced_message() -> &'static str {
     "another client connected to the same tunnel, so this client will exit instead of reconnecting"
+}
+
+fn tunnel_expired_message() -> &'static str {
+    "tunnel ttl expired; the server deleted this tunnel, so the client will exit"
 }
 
 fn stored_tunnel_error_is_terminal(error: &anyhow::Error) -> bool {
@@ -429,12 +468,14 @@ async fn create_tunnel(
     client_id: Option<&str>,
     client_secret: Option<&str>,
     create_token: Option<&str>,
+    ttl_seconds: Option<u64>,
 ) -> anyhow::Result<CreateTunnelResponse> {
     let create_url = format!("{}/api/v1/tunnels", server.trim_end_matches('/'));
     let mut request = client.post(create_url).json(&serde_json::json!({
         "subdomain": subdomain,
         "client_id": client_id,
         "client_secret": client_secret,
+        "ttl_seconds": ttl_seconds,
     }));
     if let Some(token) = create_token.filter(|token| !token.trim().is_empty()) {
         request = request.bearer_auth(token);
@@ -1138,6 +1179,18 @@ mod tests {
             ..ConnectionStats::default()
         }));
         assert!(!duplicate_replaced(&ConnectionStats::default()));
+    }
+
+    #[test]
+    fn tunnel_expired_disconnect_is_terminal() {
+        assert!(tunnel_expired(&ConnectionStats {
+            last_disconnect_reason: Some("tunnel_expired".to_string()),
+            ..ConnectionStats::default()
+        }));
+        assert!(!tunnel_expired(&ConnectionStats {
+            last_disconnect_reason: Some("websocket_closed".to_string()),
+            ..ConnectionStats::default()
+        }));
     }
 
     #[test]

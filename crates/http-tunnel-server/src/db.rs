@@ -53,6 +53,7 @@ async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "sessions", "client_country", "TEXT").await?;
     ensure_column(pool, "tunnels", "owner_client_id", "TEXT").await?;
     ensure_column(pool, "tunnels", "owner_client_secret_hash", "TEXT").await?;
+    ensure_column(pool, "tunnels", "client_ttl_seconds", "INTEGER").await?;
     ensure_column(pool, "tunnels", "claim_expires_at", "TIMESTAMP").await?;
     ensure_tunnel_claim_schema(pool).await?;
     ensure_dashboard_presence_schema(pool).await?;
@@ -162,6 +163,7 @@ async fn rebuild_tunnels_without_subdomain_unique(pool: &SqlitePool) -> anyhow::
              client_user_agent TEXT, \
              owner_client_id TEXT, \
              owner_client_secret_hash TEXT, \
+             client_ttl_seconds INTEGER, \
              claim_expires_at TIMESTAMP, \
              access_policy TEXT NOT NULL DEFAULT 'public', \
              access_token_hash TEXT, \
@@ -179,12 +181,12 @@ async fn rebuild_tunnels_without_subdomain_unique(pool: &SqlitePool) -> anyhow::
             "INSERT INTO tunnels_new ( \
              id, subdomain, token_hash, status, enabled, created_at, connected_at, disconnected_at, \
              expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, \
-             claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
+             client_ttl_seconds, claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
              allowed_methods, blocked_path_prefixes, inspector_enabled, rate_limit_per_minute \
              ) \
              SELECT id, subdomain, token_hash, status, enabled, created_at, connected_at, disconnected_at, \
              expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, \
-             claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
+             NULL, claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
              allowed_methods, blocked_path_prefixes, inspector_enabled, rate_limit_per_minute FROM tunnels",
         )
         .execute(&mut *conn)
@@ -240,6 +242,14 @@ async fn ensure_dashboard_presence_schema(pool: &SqlitePool) -> anyhow::Result<(
 }
 
 async fn cleanup_startup_state(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE tunnels SET status = 'deleted', expires_at = CURRENT_TIMESTAMP, disconnected_at = CURRENT_TIMESTAMP, \
+         claim_expires_at = CURRENT_TIMESTAMP \
+         WHERE status != 'deleted' AND client_ttl_seconds IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP, \
          claim_expires_at = datetime('now', '+1 hour') \
@@ -320,6 +330,7 @@ mod tests {
              expires_at TIMESTAMP NOT NULL, \
              client_ip TEXT, \
              client_user_agent TEXT, \
+             client_ttl_seconds INTEGER, \
              access_policy TEXT NOT NULL DEFAULT 'public', \
              access_token_hash TEXT, \
              access_username TEXT, \

@@ -8,9 +8,10 @@ use axum::{
     response::Response,
     Router,
 };
-use http_tunnel_common::ServerConfig;
+use http_tunnel_common::{ids::generate_event_id, ServerConfig};
 use http_tunnel_protocol::{Frame, FrameType};
 use serde::Serialize;
+use sqlx::Row;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
@@ -96,6 +97,7 @@ fn spawn_cleanup_job(state: AppState) {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CleanupSummary {
+    pub deleted_client_ttl_tunnels: u64,
     pub expired_reserved: u64,
     pub expired_disconnected: u64,
     pub expired_connected: u64,
@@ -109,6 +111,21 @@ pub(crate) struct CleanupSummary {
 
 pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSummary> {
     let cfg = state.config.read().await.clone();
+    let expired_client_ttl_ids = sqlx::query(
+        "SELECT id FROM tunnels \
+         WHERE status != 'deleted' AND client_ttl_seconds IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP",
+    )
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .map(|row| row.get::<String, _>("id"))
+    .collect::<Vec<_>>();
+    let mut deleted_client_ttl_tunnels = 0;
+    for tunnel_id in expired_client_ttl_ids {
+        if delete_expired_client_ttl_tunnel(state, &tunnel_id).await? {
+            deleted_client_ttl_tunnels += 1;
+        }
+    }
     let expired_reserved = sqlx::query(
         "UPDATE tunnels SET status = 'expired' \
          WHERE status = 'reserved' AND expires_at <= CURRENT_TIMESTAMP",
@@ -193,6 +210,7 @@ pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSumm
     .await?
     .rows_affected();
     Ok(CleanupSummary {
+        deleted_client_ttl_tunnels,
         expired_reserved,
         expired_disconnected,
         expired_connected,
@@ -203,6 +221,63 @@ pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSumm
         deleted_audit_logs,
         deleted_sessions,
     })
+}
+
+pub(crate) fn schedule_client_ttl_expiry(state: AppState, tunnel_id: String, ttl_seconds: u64) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(ttl_seconds.max(1))).await;
+        match delete_expired_client_ttl_tunnel(&state, &tunnel_id).await {
+            Ok(true) => {
+                tracing::info!(%tunnel_id, "client ttl expired; tunnel deleted");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, %tunnel_id, "failed to delete expired client ttl tunnel");
+            }
+        }
+    });
+}
+
+pub(crate) async fn delete_expired_client_ttl_tunnel(
+    state: &AppState,
+    tunnel_id: &str,
+) -> anyhow::Result<bool> {
+    let result = sqlx::query(
+        "UPDATE tunnels SET status = 'deleted', expires_at = CURRENT_TIMESTAMP, disconnected_at = CURRENT_TIMESTAMP, \
+         claim_expires_at = CURRENT_TIMESTAMP \
+         WHERE id = ?1 AND status != 'deleted' AND client_ttl_seconds IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP",
+    )
+    .bind(tunnel_id)
+    .execute(&state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    let sessions = state.remove_sessions_for_tunnel(tunnel_id).await;
+    for session in sessions {
+        cancel_pending_streams_for_session(state, &session, "tunnel_expired").await;
+        let _ = session
+            .tx
+            .send(Frame::new(FrameType::Goaway, 0, b"tunnel_expired".to_vec()))
+            .await;
+        sqlx::query(
+            "UPDATE sessions SET disconnected_at = CURRENT_TIMESTAMP, disconnect_reason = 'tunnel_expired' \
+             WHERE id = ?1 AND disconnected_at IS NULL",
+        )
+        .bind(&session.session_id)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO events (id, tunnel_id, kind, message) VALUES (?1, ?2, 'tunnel_deleted', 'client ttl expired')",
+    )
+    .bind(generate_event_id())
+    .bind(tunnel_id)
+    .execute(&state.pool)
+    .await?;
+    Ok(true)
 }
 
 async fn cleanup_stale_runtime_sessions(

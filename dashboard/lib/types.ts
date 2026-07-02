@@ -46,6 +46,7 @@ export type PublicTunnel = {
   source: PublicTunnelSource;
   last_seen_at?: string | null;
   expires_at: string;
+  client_ttl_seconds?: number | null;
   disconnected_at?: string | null;
   claim_expires_at?: string | null;
 };

@@ -10,8 +10,9 @@ use anyhow::Context;
 use clap::Parser;
 use cli::{Cli, Command, ConfigCommand, RuntimeCommand};
 use config::{
-    clear_stored_tunnel, clear_stored_tunnel_on_endpoint_override, default_config_path,
-    init_config_file, load_config_file, save_config_file,
+    clear_stored_tunnel, clear_stored_tunnel_on_endpoint_override,
+    clear_stored_tunnel_on_ttl_override, default_config_path, init_config_file, load_config_file,
+    save_config_file,
 };
 use connect::{connect, release_tunnel};
 use doctor::run_doctor;
@@ -64,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
                     server,
                     target,
                     subdomain,
+                    ttl_seconds,
                     tunnel_id,
                     token,
                     url,
@@ -88,6 +90,13 @@ async fn main() -> anyhow::Result<()> {
                     clear_stored_tunnel(&mut cfg);
                 }
                 cfg.subdomain = Some(subdomain);
+            }
+            let ttl_seconds = validate_ttl_seconds(ttl_seconds)?;
+            if let Some(ttl_seconds) = ttl_seconds {
+                if cfg.ttl_seconds != Some(ttl_seconds) {
+                    clear_stored_tunnel(&mut cfg);
+                }
+                cfg.ttl_seconds = Some(ttl_seconds);
             }
             if let Some(tunnel_id) = tunnel_id {
                 cfg.tunnel_id = Some(tunnel_id);
@@ -130,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             server,
             subdomain,
+            ttl_seconds,
             create_token,
             no_persist_token,
             json_events,
@@ -137,13 +147,16 @@ async fn main() -> anyhow::Result<()> {
             let mut cfg = load_config_file()?;
             let old_server = cfg.server.clone();
             let old_subdomain = cfg.subdomain.clone();
+            let old_ttl_seconds = cfg.ttl_seconds;
             let explicit_server = server.is_some();
             let explicit_subdomain = subdomain.is_some();
+            let explicit_ttl_seconds = ttl_seconds.is_some();
             let target = format!("http://127.0.0.1:{port}");
             let server = server
                 .or_else(|| cfg.server.clone())
                 .context("server is required via --server or client config")?;
             let subdomain = subdomain.or_else(|| cfg.subdomain.clone());
+            let ttl_seconds = validate_ttl_seconds(ttl_seconds.or(cfg.ttl_seconds))?;
             clear_stored_tunnel_on_endpoint_override(
                 &mut cfg,
                 explicit_server,
@@ -153,9 +166,16 @@ async fn main() -> anyhow::Result<()> {
                 old_subdomain.as_deref(),
                 subdomain.as_deref(),
             );
+            clear_stored_tunnel_on_ttl_override(
+                &mut cfg,
+                explicit_ttl_seconds,
+                old_ttl_seconds,
+                ttl_seconds,
+            );
             cfg.server = Some(server.clone());
             cfg.target = Some(target.clone());
             cfg.subdomain = subdomain.clone();
+            cfg.ttl_seconds = ttl_seconds;
             if let Some(create_token) = create_token {
                 cfg.create_token = Some(create_token);
             }
@@ -168,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
             server,
             target,
             subdomain,
+            ttl_seconds,
             create_token,
             no_persist_token,
             json_events,
@@ -175,8 +196,10 @@ async fn main() -> anyhow::Result<()> {
             let mut cfg = load_config_file()?;
             let old_server = cfg.server.clone();
             let old_subdomain = cfg.subdomain.clone();
+            let old_ttl_seconds = cfg.ttl_seconds;
             let explicit_server = server.is_some();
             let explicit_subdomain = subdomain.is_some();
+            let explicit_ttl_seconds = ttl_seconds.is_some();
             let server = server
                 .or_else(|| cfg.server.clone())
                 .context("server is required via --server or client config")?;
@@ -184,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| cfg.target.clone())
                 .context("target is required via --target or client config")?;
             let subdomain = subdomain.or_else(|| cfg.subdomain.clone());
+            let ttl_seconds = validate_ttl_seconds(ttl_seconds.or(cfg.ttl_seconds))?;
             clear_stored_tunnel_on_endpoint_override(
                 &mut cfg,
                 explicit_server,
@@ -193,9 +217,16 @@ async fn main() -> anyhow::Result<()> {
                 old_subdomain.as_deref(),
                 subdomain.as_deref(),
             );
+            clear_stored_tunnel_on_ttl_override(
+                &mut cfg,
+                explicit_ttl_seconds,
+                old_ttl_seconds,
+                ttl_seconds,
+            );
             cfg.server = Some(server.clone());
             cfg.target = Some(target.clone());
             cfg.subdomain = subdomain.clone();
+            cfg.ttl_seconds = ttl_seconds;
             if let Some(create_token) = create_token {
                 cfg.create_token = Some(create_token);
             }
@@ -250,6 +281,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_ttl_seconds(ttl_seconds: Option<u64>) -> anyhow::Result<Option<u64>> {
+    if let Some(ttl_seconds) = ttl_seconds {
+        anyhow::ensure!(ttl_seconds >= 60, "ttl_seconds must be at least 60");
+    }
+    Ok(ttl_seconds)
 }
 
 fn print_runtime_status() -> anyhow::Result<()> {

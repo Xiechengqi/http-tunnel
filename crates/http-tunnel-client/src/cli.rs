@@ -20,6 +20,8 @@ pub enum Command {
         target: Option<String>,
         #[arg(long)]
         subdomain: Option<String>,
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
         #[arg(long, env = "HTTP_TUNNEL_CREATE_TOKEN")]
         create_token: Option<String>,
         #[arg(long)]
@@ -33,6 +35,8 @@ pub enum Command {
         server: Option<String>,
         #[arg(long)]
         subdomain: Option<String>,
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
         #[arg(long, env = "HTTP_TUNNEL_CREATE_TOKEN")]
         create_token: Option<String>,
         #[arg(long)]
@@ -101,6 +105,8 @@ pub enum ConfigCommand {
         target: Option<String>,
         #[arg(long)]
         subdomain: Option<String>,
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
         #[arg(long)]
         tunnel_id: Option<String>,
         #[arg(long)]

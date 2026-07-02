@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tunnels (
     client_user_agent TEXT,
     owner_client_id TEXT,
     owner_client_secret_hash TEXT,
+    client_ttl_seconds INTEGER,
     claim_expires_at TIMESTAMP,
     access_policy TEXT NOT NULL DEFAULT 'public',
     access_token_hash TEXT,
