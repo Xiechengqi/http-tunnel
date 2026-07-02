@@ -104,7 +104,7 @@ The client creates a tunnel, connects over WebSocket, forwards HTTP/WebSocket tr
 
 On connect, the client sends a protocol `Hello` containing the client version, protocol version, capabilities (`http`, `websocket`, `heartbeat`), any in-memory reconnect token from the previous connection, and a best-effort public IP report for dashboard country display. The server accepts legacy clients that do not send these fields, but disconnects clients that explicitly report an unsupported protocol version.
 
-The public IP report is not used for authentication, rate limits, or audit identity. The client reads only a public IP from the configured lookup URLs, rejects private/reserved IPs locally, sends the IP at registration, and refreshes it every `public_ip_refresh_seconds` seconds while connected. The server resolves the country locally from `GeoIP-Country.mmdb`; if the server has no compatible country database, the dashboard will still show `Unknown country`.
+The public IP and country report is not used for authentication, rate limits, or audit identity. The client reads a public IP from the configured lookup URLs, rejects private/reserved IPs locally, fills country data from its own lookup when possible, sends the report at registration, and refreshes it every `public_ip_refresh_seconds` seconds while connected. The server stores this client-reported country data as-is after validation; if the client cannot report a country, the dashboard shows `Unknown country`.
 
 The client responds to protocol `Ping` frames with `Pong`; this lets the server detect half-open or stale sessions.
 

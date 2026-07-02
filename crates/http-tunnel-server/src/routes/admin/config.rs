@@ -571,7 +571,7 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             false,
             false,
             "127.0.0.1/32,::1/128,<Cloudflare IP ranges>",
-            "CIDRs allowed to supply CF-Connecting-IP, CF-IPCountry, and X-Forwarded-For.",
+            "CIDRs allowed to supply CF-Connecting-IP and X-Forwarded-For.",
         ),
         schema(
             "database_url",

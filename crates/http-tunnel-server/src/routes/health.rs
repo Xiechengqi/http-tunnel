@@ -1,6 +1,8 @@
-use crate::{geoip, state::AppState};
+use crate::state::AppState;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use http_tunnel_common::{api::ApiResponse, build_info::BuildInfo};
+use http_tunnel_common::{
+    api::ApiResponse, build_info::BuildInfo, country::normalize_country_code,
+};
 use serde::Serialize;
 use sqlx::Row;
 use std::{collections::HashMap, net::IpAddr, time::UNIX_EPOCH};
@@ -101,7 +103,7 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
     let database_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     let runtime = runtime_tunnel_metrics(&state).await;
     let tunnels = public_tunnels(&state, &cfg, &runtime).await;
-    let country_sources = public_country_sources(&state, &cfg, &runtime).await;
+    let country_sources = public_country_sources(&state, &runtime).await;
     let stats = dashboard_stats(&tunnels, &country_sources);
 
     Json(ApiResponse::ok(DashboardSummary {
@@ -248,22 +250,13 @@ async fn public_tunnels(
                 .try_get::<Option<String>, _>("latest_country_code")
                 .ok()
                 .flatten()
-                .and_then(|code| geoip::normalize_country_code(Some(&code)));
+                .and_then(|code| normalize_country_code(&code));
             let row_country = row
                 .try_get::<Option<String>, _>("latest_country")
                 .ok()
                 .flatten()
                 .filter(|value| !value.trim().is_empty());
-            let geo_country = source_ip.and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
-            let source = public_source(
-                row_country_code.or_else(|| {
-                    geo_country
-                        .as_ref()
-                        .map(|country| country.country_code.clone())
-                }),
-                row_country.or_else(|| geo_country.and_then(|country| country.country)),
-                source_present,
-            );
+            let source = public_source(row_country_code, row_country, source_present);
             PublicTunnel {
                 url: cfg
                     .public_url(&subdomain)
@@ -290,7 +283,6 @@ async fn public_tunnels(
 
 async fn public_country_sources(
     state: &AppState,
-    cfg: &http_tunnel_common::ServerConfig,
     runtime: &HashMap<String, RuntimeTunnelMetrics>,
 ) -> Vec<PublicTunnelCountrySource> {
     let session_ids = runtime
@@ -302,7 +294,7 @@ async fn public_country_sources(
     }
 
     let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT tunnel_id, client_country_code, client_country, client_reported_ip \
+        "SELECT tunnel_id, client_country_code, client_country \
          FROM sessions WHERE id IN (",
     );
     let mut separated = builder.separated(", ");
@@ -323,27 +315,16 @@ async fn public_country_sources(
             .try_get::<Option<String>, _>("client_country_code")
             .ok()
             .flatten()
-            .and_then(|code| geoip::normalize_country_code(Some(&code)));
+            .and_then(|code| normalize_country_code(&code));
         let row_country = row
             .try_get::<Option<String>, _>("client_country")
             .ok()
             .flatten()
             .filter(|value| !value.trim().is_empty());
-        let reported_country = row
-            .try_get::<Option<String>, _>("client_reported_ip")
-            .ok()
-            .flatten()
-            .as_deref()
-            .and_then(parse_ip)
-            .and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
-        let Some(country_code) = row_country_code.or_else(|| {
-            reported_country
-                .as_ref()
-                .map(|country| country.country_code.clone())
-        }) else {
+        let Some(country_code) = row_country_code else {
             continue;
         };
-        let country = row_country.or_else(|| reported_country.and_then(|country| country.country));
+        let country = row_country;
         let tunnel_id = row.get::<String, _>("tunnel_id");
         let entry = by_country
             .entry(country_code)

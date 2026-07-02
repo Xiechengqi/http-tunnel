@@ -7,6 +7,7 @@ use std::{path::Path, str::FromStr};
 
 const INIT_SQL: &str = include_str!("../../../schema/initial.sql");
 const INIT_SCHEMA_VERSION: &str = "initial";
+const TUNNEL_CLAIMS_SCHEMA_VERSION: &str = "tunnel_claims_v1";
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
     ensure_sqlite_parent(database_url)?;
@@ -50,6 +51,10 @@ async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "sessions", "client_country_source", "TEXT").await?;
     ensure_column(pool, "sessions", "client_country_code", "TEXT").await?;
     ensure_column(pool, "sessions", "client_country", "TEXT").await?;
+    ensure_column(pool, "tunnels", "owner_client_id", "TEXT").await?;
+    ensure_column(pool, "tunnels", "owner_client_secret_hash", "TEXT").await?;
+    ensure_column(pool, "tunnels", "claim_expires_at", "TIMESTAMP").await?;
+    ensure_tunnel_claim_schema(pool).await?;
     Ok(())
 }
 
@@ -101,9 +106,124 @@ async fn ensure_column(
     Ok(())
 }
 
+async fn ensure_tunnel_claim_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    let applied = schema_version_applied(pool, TUNNEL_CLAIMS_SCHEMA_VERSION).await?;
+    if !applied && tunnels_has_legacy_subdomain_unique(pool).await? {
+        rebuild_tunnels_without_subdomain_unique(pool).await?;
+    }
+    ensure_claim_index(pool).await?;
+    if !applied {
+        record_schema_version(pool, TUNNEL_CLAIMS_SCHEMA_VERSION).await?;
+    }
+    Ok(())
+}
+
+async fn tunnels_has_legacy_subdomain_unique(pool: &SqlitePool) -> anyhow::Result<bool> {
+    let indexes = sqlx::query("PRAGMA index_list(tunnels)")
+        .fetch_all(pool)
+        .await?;
+    for index in indexes {
+        let unique = index.try_get::<i64, _>("unique").unwrap_or_default() != 0;
+        let partial = index.try_get::<i64, _>("partial").unwrap_or_default() != 0;
+        if !unique || partial {
+            continue;
+        }
+        let name = index.get::<String, _>("name");
+        let columns = sqlx::query(&format!("PRAGMA index_info({name})"))
+            .fetch_all(pool)
+            .await?;
+        if columns.len() == 1 && columns[0].get::<String, _>("name").eq("subdomain") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn rebuild_tunnels_without_subdomain_unique(pool: &SqlitePool) -> anyhow::Result<()> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *conn)
+        .await?;
+    let result = async {
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        sqlx::query(
+            "CREATE TABLE tunnels_new ( \
+             id TEXT PRIMARY KEY, \
+             subdomain TEXT NOT NULL, \
+             token_hash TEXT NOT NULL, \
+             status TEXT NOT NULL, \
+             enabled BOOLEAN NOT NULL DEFAULT TRUE, \
+             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+             connected_at TIMESTAMP, \
+             disconnected_at TIMESTAMP, \
+             expires_at TIMESTAMP NOT NULL, \
+             client_ip TEXT, \
+             client_user_agent TEXT, \
+             owner_client_id TEXT, \
+             owner_client_secret_hash TEXT, \
+             claim_expires_at TIMESTAMP, \
+             access_policy TEXT NOT NULL DEFAULT 'public', \
+             access_token_hash TEXT, \
+             access_username TEXT, \
+             access_password_hash TEXT, \
+             allowed_methods TEXT, \
+             blocked_path_prefixes TEXT, \
+             inspector_enabled BOOLEAN NOT NULL DEFAULT FALSE, \
+             rate_limit_per_minute INTEGER \
+             )",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query(
+            "INSERT INTO tunnels_new ( \
+             id, subdomain, token_hash, status, enabled, created_at, connected_at, disconnected_at, \
+             expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, \
+             claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
+             allowed_methods, blocked_path_prefixes, inspector_enabled, rate_limit_per_minute \
+             ) \
+             SELECT id, subdomain, token_hash, status, enabled, created_at, connected_at, disconnected_at, \
+             expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, \
+             claim_expires_at, access_policy, access_token_hash, access_username, access_password_hash, \
+             allowed_methods, blocked_path_prefixes, inspector_enabled, rate_limit_per_minute FROM tunnels",
+        )
+        .execute(&mut *conn)
+        .await?;
+        sqlx::query("DROP TABLE tunnels").execute(&mut *conn).await?;
+        sqlx::query("ALTER TABLE tunnels_new RENAME TO tunnels")
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        let _ = sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut *conn)
+            .await;
+        return Err(error.into());
+    }
+    sqlx::query("PRAGMA foreign_keys=ON")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn ensure_claim_index(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_claimed \
+         ON tunnels(subdomain) WHERE status != 'deleted'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn cleanup_startup_state(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP \
+        "UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP, \
+         claim_expires_at = datetime('now', '+1 hour') \
          WHERE status = 'connected'",
     )
     .execute(pool)
@@ -136,4 +256,118 @@ fn ensure_sqlite_parent(database_url: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn migrates_legacy_subdomain_unique_constraint() {
+        let database = unique_test_db("legacy-subdomain-unique");
+        if let Some(parent) = database.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let database_url = format!("sqlite://{}", database.display());
+        let options = SqliteConnectOptions::from_str(&database_url)
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE schema_versions (version TEXT PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO schema_versions (version) VALUES ('initial')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tunnels ( \
+             id TEXT PRIMARY KEY, \
+             subdomain TEXT NOT NULL UNIQUE, \
+             token_hash TEXT NOT NULL, \
+             status TEXT NOT NULL, \
+             enabled BOOLEAN NOT NULL DEFAULT TRUE, \
+             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+             connected_at TIMESTAMP, \
+             disconnected_at TIMESTAMP, \
+             expires_at TIMESTAMP NOT NULL, \
+             client_ip TEXT, \
+             client_user_agent TEXT, \
+             access_policy TEXT NOT NULL DEFAULT 'public', \
+             access_token_hash TEXT, \
+             access_username TEXT, \
+             access_password_hash TEXT, \
+             allowed_methods TEXT, \
+             blocked_path_prefixes TEXT, \
+             inspector_enabled BOOLEAN NOT NULL DEFAULT FALSE, \
+             rate_limit_per_minute INTEGER \
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE sessions ( \
+             id TEXT PRIMARY KEY, \
+             tunnel_id TEXT NOT NULL REFERENCES tunnels(id) ON DELETE CASCADE, \
+             connected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+             disconnected_at TIMESTAMP, \
+             disconnect_reason TEXT, \
+             last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+             client_version TEXT, \
+             client_capabilities TEXT, \
+             remote_addr TEXT \
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let pool = connect(&database_url).await.unwrap();
+        sqlx::query(
+            "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at) VALUES \
+             ('deleted_1', 'demo', 'hash', 'deleted', datetime('now', '+1 hour')), \
+             ('deleted_2', 'demo', 'hash', 'deleted', datetime('now', '+1 hour'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at) \
+             VALUES ('active_1', 'demo', 'hash', 'reserved', datetime('now', '+1 hour'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let duplicate = sqlx::query(
+            "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at) \
+             VALUES ('active_2', 'demo', 'hash', 'reserved', datetime('now', '+1 hour'))",
+        )
+        .execute(&pool)
+        .await;
+        assert!(duplicate.is_err());
+    }
+
+    fn unique_test_db(name: &str) -> std::path::PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .join("target")
+            .join("db-tests")
+            .join(format!("{name}-{now}.sqlite3"))
+    }
 }

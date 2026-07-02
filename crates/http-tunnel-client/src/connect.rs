@@ -1,5 +1,5 @@
 use crate::{
-    config::{clear_stored_tunnel, save_config_file, ClientConfig},
+    config::{clear_stored_tunnel, ensure_client_identity, save_config_file, ClientConfig},
     http_forward::forward_one_request,
     runtime::{clear_disconnect_request, disconnect_requested, write_status, RuntimeStatus},
     ws_forward::{forward_one_websocket, frame_to_ws_close, frame_to_ws_message},
@@ -61,6 +61,7 @@ const DEFAULT_PUBLIC_IP_LOOKUP_URLS: &[&str] = &[
     "https://api64.ipify.org?format=json",
     "https://api.ipify.org?format=json",
 ];
+const DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE: &str = "https://ipwho.is/{ip}";
 
 #[derive(Debug, Clone)]
 struct PublicIpLookup {
@@ -130,6 +131,11 @@ pub async fn connect(
     json_events: bool,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
+    if ensure_client_identity(&mut cfg) {
+        if let Err(error) = save_config_file(&cfg) {
+            eprintln!("failed to save client identity: {error}");
+        }
+    }
     let had_stored_tunnel = cfg.tunnel_id.is_some() && cfg.token.is_some();
     let persist_token = cfg.persist_token.unwrap_or(true);
     let data = if let (Some(id), Some(token)) = (cfg.tunnel_id.clone(), cfg.token.clone()) {
@@ -153,6 +159,8 @@ pub async fn connect(
             &client,
             &server,
             subdomain.clone(),
+            cfg.client_id.as_deref(),
+            cfg.client_secret.as_deref(),
             cfg.create_token.as_deref(),
         )
         .await?
@@ -268,6 +276,8 @@ pub async fn connect(
                         &client,
                         &server,
                         subdomain.clone(),
+                        cfg.client_id.as_deref(),
+                        cfg.client_secret.as_deref(),
                         cfg.create_token.as_deref(),
                     )
                     .await?;
@@ -345,11 +355,15 @@ async fn create_tunnel(
     client: &reqwest::Client,
     server: &str,
     subdomain: Option<String>,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
     create_token: Option<&str>,
 ) -> anyhow::Result<CreateTunnelResponse> {
     let create_url = format!("{}/api/v1/tunnels", server.trim_end_matches('/'));
     let mut request = client.post(create_url).json(&serde_json::json!({
         "subdomain": subdomain,
+        "client_id": client_id,
+        "client_secret": client_secret,
     }));
     if let Some(token) = create_token.filter(|token| !token.trim().is_empty()) {
         request = request.bearer_auth(token);
@@ -357,11 +371,21 @@ async fn create_tunnel(
     let response = request
         .send()
         .await
-        .context("create tunnel request failed")?
-        .error_for_status()
-        .context("create tunnel returned error status")?
-        .json::<ApiResponse<CreateTunnelResponse>>()
+        .context("create tunnel request failed")?;
+    let status = response.status();
+    let body = response
+        .text()
         .await
+        .context("read create tunnel response")?;
+    if !status.is_success() {
+        if let Ok(api) = serde_json::from_str::<ApiResponse<serde_json::Value>>(&body) {
+            if let Some(error) = api.error {
+                anyhow::bail!("create tunnel failed: {}: {}", error.code, error.message);
+            }
+        }
+        anyhow::bail!("create tunnel returned error status {status}: {body}");
+    }
+    let response = serde_json::from_str::<ApiResponse<CreateTunnelResponse>>(&body)
         .context("decode create tunnel response")?;
 
     let Some(data) = response.data else {
@@ -427,6 +451,12 @@ async fn run_tunnel_connection(
     });
 
     let client_source = lookup_client_source(public_ip_lookup).await;
+    log_client_source_result(
+        json_events,
+        "startup",
+        client_source.as_ref(),
+        public_ip_lookup,
+    )?;
 
     frame_tx
         .send(Frame::new(
@@ -513,7 +543,9 @@ async fn run_tunnel_connection(
                 }
             }
             _ = source_update_tick.tick(), if source_update_supported => {
-                if let Some(report) = lookup_client_source(public_ip_lookup).await {
+                let report = lookup_client_source(public_ip_lookup).await;
+                log_client_source_result(json_events, "refresh", report.as_ref(), public_ip_lookup)?;
+                if let Some(report) = report {
                     let payload = encode_payload(&report).context("encode client source update")?;
                     let _ = frame_tx
                         .send(Frame::new(FrameType::ClientSourceUpdate, 0, payload))
@@ -692,6 +724,48 @@ fn emit_client_event<T: Serialize>(json_events: bool, event: &str, data: &T) -> 
     Ok(())
 }
 
+fn log_client_source_result(
+    json_events: bool,
+    phase: &str,
+    report: Option<&ClientSourceReport>,
+    public_ip_lookup: &PublicIpLookup,
+) -> anyhow::Result<()> {
+    if json_events {
+        emit_client_event(
+            json_events,
+            "client_source",
+            &serde_json::json!({
+                "phase": phase,
+                "available": report.is_some(),
+                "public_ip": report.map(|report| report.public_ip.as_str()),
+                "country_code": report.and_then(|report| report.country_code.as_deref()),
+                "country": report.and_then(|report| report.country.as_deref()),
+                "checked_at_unix_seconds": report.and_then(|report| report.checked_at_unix_seconds),
+                "lookup_urls": &public_ip_lookup.urls,
+                "country_lookup_url": DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE,
+            }),
+        )?;
+        return Ok(());
+    }
+
+    let lookup_urls = public_ip_lookup.urls.join(",");
+    if let Some(report) = report {
+        println!(
+            "client source ({phase}): ip={} country_code={} country={} lookup_urls={lookup_urls} country_lookup_url={}",
+            report.public_ip,
+            report.country_code.as_deref().unwrap_or("unknown"),
+            report.country.as_deref().unwrap_or("unknown"),
+            DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE,
+        );
+    } else {
+        println!(
+            "client source ({phase}): unavailable lookup_urls={lookup_urls} country_lookup_url={}",
+            DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE
+        );
+    }
+    Ok(())
+}
+
 fn apply_runtime_stats(
     runtime_status: &mut RuntimeStatus,
     connected: bool,
@@ -771,8 +845,73 @@ async fn lookup_public_ip(public_ip_lookup: &PublicIpLookup) -> Option<PublicIpL
         }
         tracing::debug!(%url, "public IP lookup returned no public IP");
     }
+    if best.country_code.is_none() {
+        if let Some(public_ip) = best.public_ip.as_deref() {
+            if let Some(country_lookup) = lookup_public_ip_country(&client, public_ip).await {
+                if best.country_code.is_none() {
+                    best.country_code = country_lookup.country_code;
+                }
+                if best.country.is_none() {
+                    best.country = country_lookup.country;
+                }
+            }
+        }
+    }
     best.public_ip.as_ref()?;
     Some(best)
+}
+
+async fn lookup_public_ip_country(
+    client: &reqwest::Client,
+    public_ip: &str,
+) -> Option<PublicIpLookupResponse> {
+    let requested_ip = parse_public_ip(public_ip)?;
+    let url = public_ip_country_lookup_url(public_ip);
+    let request = client.get(&url);
+    let response = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!(%url, %error, "public IP country lookup request failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(%url, "public IP country lookup request timed out");
+            return None;
+        }
+    };
+    let body = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, response.text()).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => {
+            tracing::debug!(%url, %error, "public IP country lookup response read failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(%url, "public IP country lookup response read timed out");
+            return None;
+        }
+    };
+    let mut parsed = parse_public_ip_response(&body);
+    if let Some(response_ip) = parsed.public_ip.as_deref().and_then(parse_public_ip) {
+        if response_ip != requested_ip {
+            tracing::debug!(
+                %url,
+                requested_ip = %requested_ip,
+                response_ip = %response_ip,
+                "public IP country lookup returned mismatched IP"
+            );
+            return None;
+        }
+    }
+    if parsed.country_code.is_none() && parsed.country.is_none() {
+        tracing::debug!(%url, "public IP country lookup returned no country");
+        return None;
+    }
+    parsed.public_ip = Some(requested_ip.to_string());
+    Some(parsed)
+}
+
+fn public_ip_country_lookup_url(public_ip: &str) -> String {
+    DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE.replace("{ip}", public_ip)
 }
 
 fn parse_public_ip_response(body: &str) -> PublicIpLookupResponse {
@@ -920,6 +1059,16 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_public_ip_response(
+                r#"{"ip":"2409:8a1e:c920:d640:b073:49ff:fee4:a804","success":true,"country":"China","country_code":"CN"}"#,
+            ),
+            PublicIpLookupResponse {
+                public_ip: Some("2409:8a1e:c920:d640:b073:49ff:fee4:a804".to_string()),
+                country_code: Some("CN".to_string()),
+                country: Some("China".to_string()),
+            }
+        );
+        assert_eq!(
             parse_public_ip_response(r#"{"origin":"8.8.8.8, 1.1.1.1"}"#),
             PublicIpLookupResponse {
                 public_ip: Some("8.8.8.8".to_string()),
@@ -947,6 +1096,14 @@ mod tests {
         assert_eq!(
             normalize_public_ip_lookup_url("https://api.ipify.org?format=json"),
             "https://api.ipify.org?format=json"
+        );
+    }
+
+    #[test]
+    fn builds_public_ip_country_lookup_urls() {
+        assert_eq!(
+            public_ip_country_lookup_url("2409:8a1e:c920:d640:b073:49ff:fee4:a804"),
+            "https://ipwho.is/2409:8a1e:c920:d640:b073:49ff:fee4:a804"
         );
     }
 }

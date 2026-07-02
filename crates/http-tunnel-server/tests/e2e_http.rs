@@ -1308,7 +1308,7 @@ async fn expired_tunnels_return_gone_for_proxy_and_connect() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn creating_tunnel_expires_disconnected_records() {
+async fn creating_tunnel_cleans_disconnected_lifecycle_records() {
     let workspace = workspace_root();
     let server_port = free_port();
     let test_dir = unique_test_dir("expire-disconnected");
@@ -1320,11 +1320,29 @@ async fn creating_tunnel_expires_disconnected_records() {
     let http = reqwest::Client::new();
     let stale = create_tunnel(&http, server_port, "stale").await;
     let stale_id = stale["data"]["id"].as_str().unwrap();
+    let recent = create_tunnel(&http, server_port, "recent").await;
+    let recent_id = recent["data"]["id"].as_str().unwrap();
+    let old_expired = create_tunnel(&http, server_port, "oldexpired").await;
+    let old_expired_id = old_expired["data"]["id"].as_str().unwrap();
     let pool = server_db(&server).await;
     sqlx::query(
-        "UPDATE tunnels SET status = 'disconnected', expires_at = datetime('now', '-1 second') WHERE id = ?1",
+        "UPDATE tunnels SET status = 'disconnected', disconnected_at = datetime('now', '-11 minutes'), expires_at = datetime('now', '+1 hour') WHERE id = ?1",
     )
     .bind(stale_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tunnels SET status = 'disconnected', disconnected_at = datetime('now', '-9 minutes'), expires_at = datetime('now', '-1 second') WHERE id = ?1",
+    )
+    .bind(recent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tunnels SET status = 'expired', disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
+    )
+    .bind(old_expired_id)
     .execute(&pool)
     .await
     .unwrap();
@@ -1336,6 +1354,18 @@ async fn creating_tunnel_expires_disconnected_records() {
         .await
         .unwrap();
     assert_eq!(row.get::<String, _>("status"), "expired");
+    let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(recent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "disconnected");
+    let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(old_expired_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2599,6 +2629,75 @@ async fn tunnel_creation_is_rate_limited() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subdomain_claim_allows_owner_recovery_and_later_takeover() {
+    let workspace = workspace_root();
+    let server_port = free_port();
+    let test_dir = unique_test_dir("subdomain-claim");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let server = TestServer::start(&workspace, &test_dir, server_port).await;
+    server.setup().await;
+
+    let http = reqwest::Client::new();
+    let first =
+        create_tunnel_with_identity(&http, server_port, "claim", "client-a", "secret-a").await;
+    let first_id = first["data"]["id"].as_str().unwrap().to_string();
+    let first_token = first["data"]["token"].as_str().unwrap().to_string();
+    let pool = server_db(&server).await;
+    sqlx::query(
+        "UPDATE tunnels SET status = 'disconnected', disconnected_at = datetime('now', '-30 minutes'), claim_expires_at = datetime('now', '+30 minutes') WHERE id = ?1",
+    )
+    .bind(&first_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let other = http
+        .post(format!("http://127.0.0.1:{server_port}/api/v1/tunnels"))
+        .json(&serde_json::json!({
+            "subdomain": "claim",
+            "client_id": "client-b",
+            "client_secret": "secret-b"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::CONFLICT);
+    let other_body: Value = other.json().await.unwrap();
+    assert_eq!(other_body["error"]["code"], "duplicate_subdomain");
+
+    let reclaimed =
+        create_tunnel_with_identity(&http, server_port, "claim", "client-a", "secret-a").await;
+    assert_eq!(reclaimed["data"]["id"], first_id);
+    assert_ne!(reclaimed["data"]["token"], first_token);
+    let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(&first_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "reserved");
+
+    sqlx::query(
+        "UPDATE tunnels SET status = 'expired', disconnected_at = datetime('now', '-61 minutes'), claim_expires_at = datetime('now', '-1 second') WHERE id = ?1",
+    )
+    .bind(&first_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let takeover =
+        create_tunnel_with_identity(&http, server_port, "claim", "client-b", "secret-b").await;
+    let takeover_id = takeover["data"]["id"].as_str().unwrap();
+    assert_ne!(takeover_id, first_id);
+    let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(&first_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "deleted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn turnstile_verification_endpoint_can_be_mocked() {
     let workspace = workspace_root();
     let server_port = free_port();
@@ -3078,6 +3177,13 @@ async fn admin_cleanup_uses_configured_retention_and_reports_counts() {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "UPDATE tunnels SET status = 'expired', disconnected_at = datetime('now', '-61 minutes'), expires_at = datetime('now', '-61 minutes') WHERE id = ?1",
+    )
+    .bind(tunnel_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let cleanup: Value = http
         .post(format!("http://127.0.0.1:{server_port}/api/admin/cleanup"))
@@ -3093,6 +3199,18 @@ async fn admin_cleanup_uses_configured_retention_and_reports_counts() {
     assert!(cleanup["data"]["deleted_events"].as_u64().unwrap() >= 1);
     assert!(cleanup["data"]["deleted_audit_logs"].as_u64().unwrap() >= 1);
     assert!(cleanup["data"]["deleted_sessions"].as_u64().unwrap() >= 1);
+    assert!(
+        cleanup["data"]["soft_deleted_expired_tunnels"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    let row = sqlx::query("SELECT status FROM tunnels WHERE id = ?1")
+        .bind(tunnel_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<String, _>("status"), "deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3789,6 +3907,28 @@ async fn create_tunnel(http: &reqwest::Client, server_port: u16, subdomain: &str
     let response = http
         .post(format!("http://127.0.0.1:{server_port}/api/v1/tunnels"))
         .json(&serde_json::json!({"subdomain": subdomain, "ttl_seconds": 3600}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.unwrap()
+}
+
+async fn create_tunnel_with_identity(
+    http: &reqwest::Client,
+    server_port: u16,
+    subdomain: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Value {
+    let response = http
+        .post(format!("http://127.0.0.1:{server_port}/api/v1/tunnels"))
+        .json(&serde_json::json!({
+            "subdomain": subdomain,
+            "ttl_seconds": 3600,
+            "client_id": client_id,
+            "client_secret": client_secret
+        }))
         .send()
         .await
         .unwrap();

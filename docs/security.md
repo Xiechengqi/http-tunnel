@@ -19,7 +19,7 @@ Browser login sets:
 
 Mutating admin APIs require `X-CSRF-Token` when authenticated by cookie. Bearer-token API clients are not subject to CSRF checks.
 
-When `trust_proxy_headers = true`, `CF-Connecting-IP`, `CF-IPCountry`, and `X-Forwarded-For` are trusted only if the direct peer IP matches `trusted_proxy_cidrs`. The default trusted CIDRs include loopback and Cloudflare IP ranges:
+When `trust_proxy_headers = true`, `CF-Connecting-IP` and `X-Forwarded-For` are trusted only if the direct peer IP matches `trusted_proxy_cidrs`. The default trusted CIDRs include loopback and Cloudflare IP ranges:
 
 ```toml
 trusted_proxy_cidrs = ["127.0.0.1/32", "::1/128", "... Cloudflare ranges ..."]

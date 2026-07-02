@@ -18,7 +18,6 @@ CI/release asset checks:
 - `http-tunnel-server-linux-arm64`
 - `http-tunnel-client-linux-arm64`
 - SHA256 checksum sidecars or aggregate checksum files for server assets
-- Optional country heat-map database: set `HTTP_TUNNEL_EMBED_GEOIP_COUNTRY_GZ` or provide `crates/http-tunnel-server/assets/GeoIP-Country.mmdb.gz` before building.
 
 These names must match the server upgrade resolver. Accepted checksum names are `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, and `checksums.txt`; aggregate files must include the matching server asset filename.
 

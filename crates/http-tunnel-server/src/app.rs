@@ -1,4 +1,4 @@
-use crate::{db, geoip, routes, state::AppState};
+use crate::{db, routes, state::AppState};
 use anyhow::Context;
 use axum::{
     body::Body,
@@ -14,15 +14,12 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 
+pub(crate) const DISCONNECTED_TUNNEL_EXPIRE_AFTER: &str = "-10 minutes";
+pub(crate) const EXPIRED_TUNNEL_DELETE_AFTER: &str = "-1 hour";
+pub(crate) const SUBDOMAIN_CLAIM_AFTER_DISCONNECT: &str = "+1 hour";
+
 pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<()> {
     let addr = config.addr;
-    match geoip::ensure_embedded_country_db(&config.data_dir) {
-        Ok(true) => {
-            tracing::info!(data_dir = %config.data_dir, "installed embedded GeoIP country database")
-        }
-        Ok(false) => {}
-        Err(error) => tracing::warn!(%error, "failed to install embedded GeoIP country database"),
-    }
     let pool = db::connect(&config.database_url).await?;
     let state = AppState::new(config_path, config, pool);
     spawn_cleanup_job(state.clone());
@@ -97,6 +94,7 @@ pub(crate) struct CleanupSummary {
     pub expired_reserved: u64,
     pub expired_disconnected: u64,
     pub expired_connected: u64,
+    pub soft_deleted_expired_tunnels: u64,
     pub stale_sessions: u64,
     pub deleted_request_logs: u64,
     pub deleted_events: u64,
@@ -114,9 +112,11 @@ pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSumm
     .await?
     .rows_affected();
     let expired_disconnected = sqlx::query(
-        "UPDATE tunnels SET status = 'expired' \
-         WHERE status = 'disconnected' AND expires_at <= CURRENT_TIMESTAMP",
+        "UPDATE tunnels SET status = 'expired', expires_at = CURRENT_TIMESTAMP \
+         WHERE status = 'disconnected' \
+         AND COALESCE(disconnected_at, expires_at) <= datetime('now', ?1)",
     )
+    .bind(DISCONNECTED_TUNNEL_EXPIRE_AFTER)
     .execute(&state.pool)
     .await?
     .rows_affected();
@@ -143,6 +143,16 @@ pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSumm
         separated.push_unseparated(")");
         query.build().execute(&state.pool).await?.rows_affected()
     };
+    let soft_deleted_expired_tunnels = sqlx::query(
+        "UPDATE tunnels SET status = 'deleted' \
+         WHERE status = 'expired' \
+         AND (claim_expires_at <= CURRENT_TIMESTAMP \
+              OR COALESCE(disconnected_at, expires_at) <= datetime('now', ?1))",
+    )
+    .bind(EXPIRED_TUNNEL_DELETE_AFTER)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
     let stale_sessions = cleanup_stale_runtime_sessions(state, &cfg).await?;
     let deleted_request_logs = sqlx::query(
         "DELETE FROM request_logs \
@@ -181,6 +191,7 @@ pub(crate) async fn cleanup_once(state: &AppState) -> anyhow::Result<CleanupSumm
         expired_reserved,
         expired_disconnected,
         expired_connected,
+        soft_deleted_expired_tunnels,
         stale_sessions,
         deleted_request_logs,
         deleted_events,
@@ -240,10 +251,11 @@ async fn cleanup_stale_runtime_sessions(
         } else {
             sqlx::query(
                 "UPDATE sessions SET disconnected_at = CURRENT_TIMESTAMP, disconnect_reason = 'stale_session' WHERE id = ?1 AND disconnected_at IS NULL; \
-                 UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP WHERE id = ?2 AND status = 'connected'",
+                 UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP, claim_expires_at = datetime('now', ?3) WHERE id = ?2 AND status = 'connected'",
             )
             .bind(&session.session_id)
             .bind(&session.tunnel_id)
+            .bind(SUBDOMAIN_CLAIM_AFTER_DISCONNECT)
             .execute(&state.pool)
             .await?;
         }

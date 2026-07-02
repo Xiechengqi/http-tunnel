@@ -1,5 +1,6 @@
 use anyhow::Context;
 use http_tunnel_common::config::default_client_config_path;
+use http_tunnel_common::token::generate_token;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -12,6 +13,8 @@ pub struct ClientConfig {
     pub url: Option<String>,
     pub create_token: Option<String>,
     pub persist_token: Option<bool>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub public_ip_lookup_urls: Option<Vec<String>>,
     pub public_ip_refresh_seconds: Option<u64>,
 }
@@ -58,6 +61,31 @@ pub fn clear_stored_tunnel(cfg: &mut ClientConfig) {
     cfg.url = None;
 }
 
+pub fn ensure_client_identity(cfg: &mut ClientConfig) -> bool {
+    let mut changed = false;
+    if cfg
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        cfg.client_id = Some(format!("cli_{}", generate_token()));
+        changed = true;
+    }
+    if cfg
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        cfg.client_secret = Some(generate_token());
+        changed = true;
+    }
+    changed
+}
+
 pub fn clear_stored_tunnel_on_endpoint_override(
     cfg: &mut ClientConfig,
     explicit_server: bool,
@@ -98,6 +126,8 @@ token = "secret"
 url = "https://demo.example.com"
 create_token = "create-secret"
 persist_token = false
+client_id = "cli_123"
+client_secret = "client-secret"
 public_ip_lookup_urls = ["http://3.0.3.0", "https://api64.ipify.org?format=json"]
 public_ip_refresh_seconds = 3600
 "#,
@@ -111,6 +141,8 @@ public_ip_refresh_seconds = 3600
         assert_eq!(cfg.url.as_deref(), Some("https://demo.example.com"));
         assert_eq!(cfg.create_token.as_deref(), Some("create-secret"));
         assert_eq!(cfg.persist_token, Some(false));
+        assert_eq!(cfg.client_id.as_deref(), Some("cli_123"));
+        assert_eq!(cfg.client_secret.as_deref(), Some("client-secret"));
         assert_eq!(
             cfg.public_ip_lookup_urls.as_ref().unwrap(),
             &vec![
@@ -119,6 +151,22 @@ public_ip_refresh_seconds = 3600
             ]
         );
         assert_eq!(cfg.public_ip_refresh_seconds, Some(3600));
+    }
+
+    #[test]
+    fn ensures_client_identity_without_clearing_tunnel() {
+        let mut cfg = ClientConfig {
+            tunnel_id: Some("tun_1".to_string()),
+            token: Some("secret".to_string()),
+            ..ClientConfig::default()
+        };
+
+        assert!(ensure_client_identity(&mut cfg));
+        assert!(cfg.client_id.as_deref().unwrap().starts_with("cli_"));
+        assert!(cfg.client_secret.is_some());
+        assert_eq!(cfg.tunnel_id.as_deref(), Some("tun_1"));
+        assert_eq!(cfg.token.as_deref(), Some("secret"));
+        assert!(!ensure_client_identity(&mut cfg));
     }
 
     #[test]

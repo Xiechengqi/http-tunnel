@@ -3,7 +3,6 @@ mod backup;
 mod cli;
 mod db;
 mod error;
-mod geoip;
 mod net;
 mod redaction;
 mod routes;

@@ -31,8 +31,8 @@ Cloudflare:
 - Ensure wildcard DNS is proxied.
 - Ensure WebSocket support is enabled.
 - Use `public_scheme = "https"` for public Cloudflare HTTPS.
-- If the dashboard country map is empty or points to the wrong country, confirm `trusted_proxy_cidrs` includes Cloudflare ranges so `CF-Connecting-IP` and `CF-IPCountry` are trusted.
-- If clients still show `Unknown country`, make sure the server has `$HOME/.http-tunnel/GeoIP-Country.mmdb` or an embedded country database. Client-reported public IPs are only converted to countries by the server-side database.
+- If the dashboard country map is empty, check the client startup log for `client source (...)` and confirm the client can report `country_code`.
+- If clients still show `Unknown country`, the client-side public IP/country lookup did not return a valid country; the server does not infer country from Cloudflare headers or IP databases.
 
 Upgrade rollback:
 

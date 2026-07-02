@@ -143,7 +143,7 @@ The admin dashboard is available at `/admin`; first-time setup is at `/admin/set
 
 ## Key Configuration
 
-By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. The public dashboard map is a country-level heat map and does not expose precise coordinates. Cloudflare proxy deployments use trusted `CF-Connecting-IP` and `CF-IPCountry` headers; clients also report their public IP at registration and refresh it hourly, then the server resolves the country locally with `GeoIP-Country.mmdb`. Other deployments can place `GeoIP-Country.mmdb` at `$HOME/.http-tunnel/GeoIP-Country.mmdb`. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
+By default, server config, the SQLite database, and local data files live in `$HOME/.http-tunnel`; client config and runtime files use the same directory. Common settings live in `$HOME/.http-tunnel/server.toml` and can also be overridden by CLI flags or environment variables. The public dashboard map is a country-level heat map and does not expose precise coordinates. Cloudflare proxy deployments only use trusted `CF-Connecting-IP` / `X-Forwarded-For` headers to identify the client IP. Country data only comes from the client report sent at registration and refreshed hourly; the server does not read proxy country headers or resolve countries locally from IP addresses. See [Admin](docs/admin.md) and [Security](docs/security.md) for the full operator-facing details.
 
 | Area | Settings |
 | --- | --- |

@@ -12,7 +12,7 @@ The dashboard is built as a Next.js static export and embedded into the server b
 
 Without `--config`, the server uses `$HOME/.http-tunnel/server.toml`, `sqlite://$HOME/.http-tunnel/http-tunnel.sqlite3`, and `$HOME/.http-tunnel` for local data. Pass `--config` or set `HTTP_TUNNEL_CONFIG` only when a deployment needs a different location.
 
-The public dashboard source map is a country-level heat map. Cloudflare proxy deployments use trusted `CF-Connecting-IP` and `CF-IPCountry` headers. Clients also report their public IP at registration and refresh it every hour, but the server still resolves countries locally. For non-Cloudflare deployments, put a compatible country mmdb at `$HOME/.http-tunnel/GeoIP-Country.mmdb`. Release builds can also embed `GeoIP-Country.mmdb.gz` by setting `HTTP_TUNNEL_EMBED_GEOIP_COUNTRY_GZ` or placing it at `crates/http-tunnel-server/assets/GeoIP-Country.mmdb.gz`; on startup the server writes it to the data directory only when no local database exists.
+The public dashboard source map is a country-level heat map. Cloudflare proxy deployments use trusted `CF-Connecting-IP` headers for client IP detection. Country data comes only from the client report sent at registration and refreshed while connected; the server does not read proxy country headers or resolve countries locally from IP addresses.
 
 The server owns setup, admin, public API, tunnel WebSocket, and subdomain proxy traffic on one HTTP listener.
 

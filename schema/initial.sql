@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 
 CREATE TABLE IF NOT EXISTS tunnels (
     id TEXT PRIMARY KEY,
-    subdomain TEXT NOT NULL UNIQUE,
+    subdomain TEXT NOT NULL,
     token_hash TEXT NOT NULL,
     status TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS tunnels (
     expires_at TIMESTAMP NOT NULL,
     client_ip TEXT,
     client_user_agent TEXT,
+    owner_client_id TEXT,
+    owner_client_secret_hash TEXT,
+    claim_expires_at TIMESTAMP,
     access_policy TEXT NOT NULL DEFAULT 'public',
     access_token_hash TEXT,
     access_username TEXT,
@@ -126,3 +129,4 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_tunnel_started ON request_logs(tunne
 CREATE INDEX IF NOT EXISTS idx_request_logs_error_started ON request_logs(error, started_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_status_started ON request_logs(status, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_tunnel_connected ON sessions(tunnel_id, connected_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_claimed ON tunnels(subdomain) WHERE status != 'deleted';

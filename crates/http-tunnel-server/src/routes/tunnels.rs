@@ -1,7 +1,6 @@
 use crate::{
     error::{AppError, Result},
-    geoip,
-    net::{client_country_code_from_headers, client_ip},
+    net::client_ip,
     routes::admin::{
         list_response, record_admin_audit, require_admin, require_admin_write, AuditLog,
     },
@@ -60,6 +59,8 @@ pub struct CreateTunnelRequest {
     pub subdomain: Option<String>,
     pub ttl_seconds: Option<u64>,
     pub turnstile_token: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,10 +124,22 @@ pub struct RotateTokenResponse {
 }
 
 #[derive(Debug, Clone)]
+struct ClientIdentity {
+    id: String,
+    secret_hash: String,
+}
+
+#[derive(Debug)]
+struct ExistingSubdomain {
+    id: String,
+    status: String,
+    owner_client_id: Option<String>,
+    owner_client_secret_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ClientSource {
     ip: String,
-    header_country_code: Option<String>,
-    remote_country: Option<geoip::CountryLocation>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,66 +161,20 @@ fn client_source(
         cfg.trust_proxy_headers,
         &cfg.trusted_proxy_cidrs,
     );
-    let header_country_code = client_country_code_from_headers(
-        headers,
-        remote_addr,
-        cfg.trust_proxy_headers,
-        &cfg.trusted_proxy_cidrs,
-    );
-    let remote_country = ip
-        .parse()
-        .ok()
-        .and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
 
-    ClientSource {
-        ip,
-        header_country_code,
-        remote_country,
-    }
+    ClientSource { ip }
 }
 
-fn resolve_client_source(
-    cfg: &http_tunnel_common::ServerConfig,
-    source: &ClientSource,
-    report: Option<&ClientSourceReport>,
-) -> ResolvedClientSource {
+fn resolve_client_source(report: Option<&ClientSourceReport>) -> ResolvedClientSource {
     let reported_ip = report.and_then(|report| parse_public_ip(&report.public_ip));
-    let reported_country = reported_ip.and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
     let reported_ip = reported_ip.map(|ip| ip.to_string());
     let reported_hint = report.and_then(reported_country_hint);
-
-    if let Some(country_code) = source.header_country_code.clone() {
-        return ResolvedClientSource {
-            country_code: Some(country_code),
-            country: None,
-            country_source: Some("cf_header"),
-            reported_ip,
-        };
-    }
-
-    if let Some(country) = reported_country {
-        return ResolvedClientSource {
-            country_code: Some(country.country_code),
-            country: country.country,
-            country_source: Some("reported_ip"),
-            reported_ip,
-        };
-    }
 
     if let Some((country_code, country)) = reported_hint {
         return ResolvedClientSource {
             country_code: Some(country_code),
             country,
             country_source: Some("client_report"),
-            reported_ip,
-        };
-    }
-
-    if let Some(country) = source.remote_country.clone() {
-        return ResolvedClientSource {
-            country_code: Some(country.country_code),
-            country: country.country,
-            country_source: Some("remote_geoip"),
             reported_ip,
         };
     }
@@ -238,6 +205,28 @@ fn reported_country_hint(report: &ClientSourceReport) -> Option<(String, Option<
                 .map(ToString::to_string)
         })?;
     Some((country_code, country))
+}
+
+fn log_resolved_client_source(
+    phase: &str,
+    subdomain: Option<&str>,
+    tunnel_id: Option<&str>,
+    session_id: &str,
+    source: &ClientSource,
+    resolved: &ResolvedClientSource,
+) {
+    tracing::info!(
+        phase = %phase,
+        subdomain = ?subdomain,
+        tunnel_id = ?tunnel_id,
+        session_id = %session_id,
+        remote_ip = %source.ip,
+        client_reported_ip = ?resolved.reported_ip,
+        country_source = ?resolved.country_source,
+        country_code = ?resolved.country_code,
+        country = ?resolved.country,
+        "client source resolved"
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +305,7 @@ pub async fn create(
         &cfg.trusted_proxy_cidrs,
     );
     let create_token_valid = tunnel_create_token_valid(&headers, &cfg);
+    expire_inactive_tunnels(&state.pool).await?;
     enforce_tunnel_create_policy(&state, &cfg, &create_ip, create_token_valid).await?;
     enforce_create_rate_limit(
         &state,
@@ -326,11 +316,10 @@ pub async fn create(
         cfg.rate_limit_per_ip,
     )
     .await?;
-    expire_inactive_tunnels(&state.pool).await?;
 
-    let subdomain = match req.subdomain {
+    let subdomain = match req.subdomain.as_deref() {
         Some(s) if cfg.allow_custom_subdomain && !cfg.require_random_subdomain => {
-            validate_subdomain(&s).map_err(|e| {
+            validate_subdomain(s).map_err(|e| {
                 AppError::new(StatusCode::BAD_REQUEST, "invalid_subdomain", e.to_string())
             })?
         }
@@ -348,15 +337,43 @@ pub async fn create(
         ));
     }
 
-    let id = generate_tunnel_id();
+    let identity = client_identity_from_request(&req)?;
     let token = generate_token();
     let token_hash = hash_token(&token);
     let ttl = req.ttl_seconds.unwrap_or(cfg.reserved_ttl_seconds).max(60);
+    let ttl_modifier = format!("+{ttl} seconds");
+    let claim_modifier = create_claim_modifier(identity.as_ref(), ttl);
     let url = cfg.public_url(&subdomain).unwrap_or_default();
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
+
+    if let Some(existing) = load_existing_subdomain(&state.pool, &subdomain).await? {
+        if owner_matches(&existing, identity.as_ref()) && existing.status != "disabled" {
+            reclaim_existing_subdomain(
+                &state.pool,
+                &existing,
+                &subdomain,
+                &token_hash,
+                &ttl_modifier,
+                &create_ip,
+                user_agent.as_deref(),
+                identity.as_ref(),
+                &claim_modifier,
+            )
+            .await?;
+            return Ok(Json(ApiResponse::ok(CreateTunnelResponse {
+                id: existing.id.clone(),
+                token,
+                url,
+                connect_url: tunnel_connect_url(&cfg, &existing.id),
+            })));
+        }
+        return Err(duplicate_subdomain_error());
+    }
+
+    let id = generate_tunnel_id();
     let connect_url = format!(
         "{}://{}/api/v1/tunnels/{}/connect",
         if cfg.public_scheme == "https" {
@@ -369,15 +386,18 @@ pub async fn create(
     );
 
     let result = sqlx::query(
-        "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at, client_ip, client_user_agent, inspector_enabled) \
-         VALUES (?1, ?2, ?3, 'reserved', datetime('now', ?4), ?5, ?6, ?7)",
+        "INSERT INTO tunnels (id, subdomain, token_hash, status, expires_at, client_ip, client_user_agent, owner_client_id, owner_client_secret_hash, claim_expires_at, inspector_enabled) \
+         VALUES (?1, ?2, ?3, 'reserved', datetime('now', ?4), ?5, ?6, ?7, ?8, datetime('now', ?9), ?10)",
     )
     .bind(&id)
     .bind(&subdomain)
     .bind(&token_hash)
-    .bind(format!("+{ttl} seconds"))
+    .bind(&ttl_modifier)
     .bind(&create_ip)
     .bind(user_agent.as_deref())
+    .bind(identity.as_ref().map(|identity| identity.id.as_str()))
+    .bind(identity.as_ref().map(|identity| identity.secret_hash.as_str()))
+    .bind(&claim_modifier)
     .bind(cfg.inspector_enabled_default)
     .execute(&state.pool)
     .await;
@@ -385,11 +405,29 @@ pub async fn create(
     if let Err(e) = result {
         let msg = e.to_string();
         if msg.contains("UNIQUE") {
-            return Err(AppError::new(
-                StatusCode::CONFLICT,
-                "duplicate_subdomain",
-                "subdomain is already reserved or active",
-            ));
+            if let Some(existing) = load_existing_subdomain(&state.pool, &subdomain).await? {
+                if owner_matches(&existing, identity.as_ref()) && existing.status != "disabled" {
+                    reclaim_existing_subdomain(
+                        &state.pool,
+                        &existing,
+                        &subdomain,
+                        &token_hash,
+                        &ttl_modifier,
+                        &create_ip,
+                        user_agent.as_deref(),
+                        identity.as_ref(),
+                        &claim_modifier,
+                    )
+                    .await?;
+                    return Ok(Json(ApiResponse::ok(CreateTunnelResponse {
+                        id: existing.id.clone(),
+                        token,
+                        url,
+                        connect_url: tunnel_connect_url(&cfg, &existing.id),
+                    })));
+                }
+            }
+            return Err(duplicate_subdomain_error());
         }
         return Err(AppError::internal(e));
     }
@@ -409,6 +447,136 @@ pub async fn create(
         url,
         connect_url,
     })))
+}
+
+async fn reclaim_existing_subdomain(
+    pool: &SqlitePool,
+    existing: &ExistingSubdomain,
+    subdomain: &str,
+    token_hash: &str,
+    ttl_modifier: &str,
+    create_ip: &str,
+    user_agent: Option<&str>,
+    identity: Option<&ClientIdentity>,
+    claim_modifier: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE tunnels SET token_hash = ?1, \
+         status = CASE WHEN status = 'connected' THEN 'connected' ELSE 'reserved' END, \
+         connected_at = CASE WHEN status = 'connected' THEN connected_at ELSE NULL END, \
+         disconnected_at = CASE WHEN status = 'connected' THEN disconnected_at ELSE NULL END, \
+         expires_at = datetime('now', ?2), client_ip = ?3, client_user_agent = ?4, \
+         owner_client_id = ?5, owner_client_secret_hash = ?6, claim_expires_at = datetime('now', ?7) \
+         WHERE id = ?8",
+    )
+    .bind(token_hash)
+    .bind(ttl_modifier)
+    .bind(create_ip)
+    .bind(user_agent)
+    .bind(identity.map(|identity| identity.id.as_str()))
+    .bind(identity.map(|identity| identity.secret_hash.as_str()))
+    .bind(claim_modifier)
+    .bind(&existing.id)
+    .execute(pool)
+    .await
+    .map_err(AppError::internal)?;
+    add_event(
+        pool,
+        Some(&existing.id),
+        None,
+        "tunnel_reclaimed",
+        Some(subdomain),
+    )
+    .await?;
+    Ok(())
+}
+
+fn tunnel_connect_url(cfg: &http_tunnel_common::ServerConfig, id: &str) -> String {
+    format!(
+        "{}://{}/api/v1/tunnels/{}/connect",
+        if cfg.public_scheme == "https" {
+            "wss"
+        } else {
+            "ws"
+        },
+        cfg.domain.clone().unwrap_or_default(),
+        id
+    )
+}
+
+fn duplicate_subdomain_error() -> AppError {
+    AppError::new(
+        StatusCode::CONFLICT,
+        "duplicate_subdomain",
+        "subdomain is already reserved or active",
+    )
+}
+
+fn client_identity_from_request(req: &CreateTunnelRequest) -> Result<Option<ClientIdentity>> {
+    let client_id = non_empty(req.client_id.as_deref());
+    let client_secret = non_empty(req.client_secret.as_deref());
+    match (client_id, client_secret) {
+        (None, None) => Ok(None),
+        (Some(id), Some(secret)) if id.len() <= 128 && secret.len() <= 256 => {
+            Ok(Some(ClientIdentity {
+                id: id.to_string(),
+                secret_hash: hash_token(secret),
+            }))
+        }
+        (Some(_), Some(_)) => Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_identity",
+            "client identity is too long",
+        )),
+        _ => Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_identity",
+            "client_id and client_secret must be provided together",
+        )),
+    }
+}
+
+fn create_claim_modifier(identity: Option<&ClientIdentity>, ttl: u64) -> String {
+    if identity.is_some() {
+        crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT.to_string()
+    } else {
+        format!("+{ttl} seconds")
+    }
+}
+
+async fn load_existing_subdomain(
+    pool: &SqlitePool,
+    subdomain: &str,
+) -> Result<Option<ExistingSubdomain>> {
+    let row = sqlx::query(
+        "SELECT id, status, owner_client_id, owner_client_secret_hash \
+         FROM tunnels WHERE subdomain = ?1 AND status != 'deleted' LIMIT 1",
+    )
+    .bind(subdomain)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    Ok(row.map(|row| ExistingSubdomain {
+        id: row.get("id"),
+        status: row.get("status"),
+        owner_client_id: row
+            .try_get::<Option<String>, _>("owner_client_id")
+            .ok()
+            .flatten(),
+        owner_client_secret_hash: row
+            .try_get::<Option<String>, _>("owner_client_secret_hash")
+            .ok()
+            .flatten(),
+    }))
+}
+
+fn owner_matches(existing: &ExistingSubdomain, identity: Option<&ClientIdentity>) -> bool {
+    let Some(identity) = identity else {
+        return false;
+    };
+    existing.owner_client_id.as_deref() == Some(identity.id.as_str())
+        && existing.owner_client_secret_hash.as_deref() == Some(identity.secret_hash.as_str())
 }
 
 fn tunnel_create_token_valid(headers: &HeaderMap, cfg: &http_tunnel_common::ServerConfig) -> bool {
@@ -704,11 +872,12 @@ async fn handle_socket(
         } else {
             let _ = sqlx::query(
                 "UPDATE sessions SET disconnected_at = CURRENT_TIMESTAMP, disconnect_reason = ?1 WHERE id = ?2; \
-                 UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP WHERE id = ?3 AND status = 'connected'",
+                 UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP, claim_expires_at = datetime('now', ?4) WHERE id = ?3 AND status = 'connected'",
             )
             .bind(disconnect_reason)
             .bind(&session_id)
             .bind(&tunnel_id)
+            .bind(crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT)
             .execute(&state.pool)
             .await;
         }
@@ -787,7 +956,7 @@ async fn handle_client_hello(
     };
     let capabilities = serde_json::to_string(&hello.capabilities).unwrap_or_else(|_| "[]".into());
     let cfg = state.config.read().await.clone();
-    let resolved_source = resolve_client_source(&cfg, source, hello.client_source.as_ref());
+    let resolved_source = resolve_client_source(hello.client_source.as_ref());
     let session_pool_policy = effective_session_pool_policy(&cfg);
     let registration = state
         .register_session(subdomain, session.clone(), session_pool_policy)
@@ -837,7 +1006,7 @@ async fn handle_client_hello(
         )
         .await;
     }
-    let _ = sqlx::query(
+    let persist_session = sqlx::query(
         "INSERT OR IGNORE INTO sessions \
             (id, tunnel_id, remote_addr, client_reported_ip, client_reported_ip_updated_at, client_country_source, client_country_code, client_country) \
          VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END, ?5, ?6, ?7); \
@@ -846,7 +1015,7 @@ async fn handle_client_hello(
              client_reported_ip_updated_at = CASE WHEN ?4 IS NULL THEN client_reported_ip_updated_at ELSE CURRENT_TIMESTAMP END, \
              client_country_source = ?5, client_country_code = ?6, client_country = ?7 \
          WHERE id = ?1; \
-         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?10) WHERE id = ?2",
+         UPDATE tunnels SET status = 'connected', connected_at = CURRENT_TIMESTAMP, disconnected_at = NULL, expires_at = datetime('now', ?10), claim_expires_at = datetime('now', ?11) WHERE id = ?2",
     )
     .bind(&session.session_id)
     .bind(&session.tunnel_id)
@@ -858,8 +1027,20 @@ async fn handle_client_hello(
     .bind(hello.client_version.as_deref())
     .bind(capabilities)
     .bind(format!("+{} seconds", cfg.tunnel_ttl_seconds))
+    .bind(crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT)
     .execute(&state.pool)
     .await;
+    if let Err(error) = &persist_session {
+        tracing::warn!(%error, "failed to persist client session");
+    }
+    log_resolved_client_source(
+        "hello",
+        Some(subdomain),
+        Some(&session.tunnel_id),
+        &session.session_id,
+        source,
+        &resolved_source,
+    );
     if hello.reconnect_token.is_some() {
         let _ = add_event(
             &state.pool,
@@ -909,8 +1090,7 @@ async fn handle_client_source_update(
             return;
         }
     };
-    let cfg = state.config.read().await.clone();
-    let resolved_source = resolve_client_source(&cfg, source, Some(&report));
+    let resolved_source = resolve_client_source(Some(&report));
     let result = sqlx::query(
         "UPDATE sessions SET \
              client_reported_ip = ?1, \
@@ -930,6 +1110,15 @@ async fn handle_client_source_update(
     .await;
     if let Err(error) = result {
         tracing::warn!(%error, "failed to update client source");
+    } else {
+        log_resolved_client_source(
+            "source_update",
+            None,
+            None,
+            session_id,
+            source,
+            &resolved_source,
+        );
     }
 }
 
@@ -1196,7 +1385,7 @@ pub async fn admin_patch(
     if req.expire_now.unwrap_or(false) {
         remove_session_for_tunnel(&state, &id).await;
         sqlx::query(
-            "UPDATE tunnels SET status = 'expired', expires_at = CURRENT_TIMESTAMP, disconnected_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status != 'deleted'",
+            "UPDATE tunnels SET status = 'expired', expires_at = CURRENT_TIMESTAMP, disconnected_at = CURRENT_TIMESTAMP, claim_expires_at = CURRENT_TIMESTAMP WHERE id = ?1 AND status != 'deleted'",
         )
         .bind(&id)
         .execute(&state.pool)
@@ -1407,8 +1596,9 @@ pub async fn admin_disconnect(
     )
     .await?;
     remove_session_for_tunnel(&state, &id).await;
-    sqlx::query("UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP WHERE id = ?1")
+    sqlx::query("UPDATE tunnels SET status = 'disconnected', disconnected_at = CURRENT_TIMESTAMP, claim_expires_at = datetime('now', ?2) WHERE id = ?1")
         .bind(&id)
+        .bind(crate::app::SUBDOMAIN_CLAIM_AFTER_DISCONNECT)
         .execute(&state.pool)
         .await
         .map_err(AppError::internal)?;
@@ -2394,8 +2584,27 @@ async fn verify_turnstile_if_required(
 async fn expire_inactive_tunnels(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "UPDATE tunnels SET status = 'expired' \
-         WHERE status IN ('reserved', 'disconnected') AND expires_at <= CURRENT_TIMESTAMP",
+         WHERE status = 'reserved' AND expires_at <= CURRENT_TIMESTAMP",
     )
+    .execute(pool)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "UPDATE tunnels SET status = 'expired', expires_at = CURRENT_TIMESTAMP \
+         WHERE status = 'disconnected' \
+         AND COALESCE(disconnected_at, expires_at) <= datetime('now', ?1)",
+    )
+    .bind(crate::app::DISCONNECTED_TUNNEL_EXPIRE_AFTER)
+    .execute(pool)
+    .await
+    .map_err(AppError::internal)?;
+    sqlx::query(
+        "UPDATE tunnels SET status = 'deleted' \
+         WHERE status = 'expired' \
+         AND (claim_expires_at <= CURRENT_TIMESTAMP \
+              OR COALESCE(disconnected_at, expires_at) <= datetime('now', ?1))",
+    )
+    .bind(crate::app::EXPIRED_TUNNEL_DELETE_AFTER)
     .execute(pool)
     .await
     .map_err(AppError::internal)?;
@@ -2407,41 +2616,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cf_country_header_wins_over_other_sources() {
-        let cfg = http_tunnel_common::ServerConfig::default();
-        let source = ClientSource {
-            ip: "198.51.100.10".to_string(),
-            header_country_code: Some("US".to_string()),
-            remote_country: Some(geoip::CountryLocation {
-                country_code: "DE".to_string(),
-                country: Some("Germany".to_string()),
-            }),
-        };
+    fn ignores_missing_client_report_country() {
         let report = ClientSourceReport {
-            public_ip: "127.0.0.1".to_string(),
+            public_ip: "8.8.8.8".to_string(),
             country_code: None,
             country: None,
             checked_at_unix_seconds: Some(1),
         };
 
-        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+        let resolved = resolve_client_source(Some(&report));
 
-        assert_eq!(resolved.country_code.as_deref(), Some("US"));
-        assert_eq!(resolved.country_source, Some("cf_header"));
-        assert_eq!(resolved.reported_ip, None);
+        assert_eq!(resolved.country_code, None);
+        assert_eq!(resolved.country, None);
+        assert_eq!(resolved.country_source, None);
+        assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
     }
 
     #[test]
-    fn remote_geoip_is_fallback_when_report_is_not_public() {
-        let cfg = http_tunnel_common::ServerConfig::default();
-        let source = ClientSource {
-            ip: "198.51.100.10".to_string(),
-            header_country_code: None,
-            remote_country: Some(geoip::CountryLocation {
-                country_code: "JP".to_string(),
-                country: Some("Japan".to_string()),
-            }),
-        };
+    fn non_public_reported_ip_does_not_store_ip_or_infer_country() {
         let report = ClientSourceReport {
             public_ip: "10.0.0.1".to_string(),
             country_code: None,
@@ -2449,44 +2641,16 @@ mod tests {
             checked_at_unix_seconds: Some(1),
         };
 
-        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+        let resolved = resolve_client_source(Some(&report));
 
-        assert_eq!(resolved.country_code.as_deref(), Some("JP"));
-        assert_eq!(resolved.country.as_deref(), Some("Japan"));
-        assert_eq!(resolved.country_source, Some("remote_geoip"));
+        assert_eq!(resolved.country_code, None);
+        assert_eq!(resolved.country, None);
+        assert_eq!(resolved.country_source, None);
         assert_eq!(resolved.reported_ip, None);
     }
 
     #[test]
-    fn public_reported_ip_is_stored_even_without_geoip_match() {
-        let cfg = http_tunnel_common::ServerConfig::default();
-        let source = ClientSource {
-            ip: "198.51.100.10".to_string(),
-            header_country_code: None,
-            remote_country: None,
-        };
-        let report = ClientSourceReport {
-            public_ip: "8.8.8.8".to_string(),
-            country_code: None,
-            country: None,
-            checked_at_unix_seconds: Some(1),
-        };
-
-        let resolved = resolve_client_source(&cfg, &source, Some(&report));
-
-        assert_eq!(resolved.country_code, None);
-        assert_eq!(resolved.country_source, None);
-        assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
-    }
-
-    #[test]
-    fn client_reported_country_is_fallback_without_geoip_match() {
-        let cfg = http_tunnel_common::ServerConfig::default();
-        let source = ClientSource {
-            ip: "198.51.100.10".to_string(),
-            header_country_code: None,
-            remote_country: None,
-        };
+    fn client_reported_country_is_used() {
         let report = ClientSourceReport {
             public_ip: "8.8.8.8".to_string(),
             country_code: Some("US".to_string()),
@@ -2494,11 +2658,27 @@ mod tests {
             checked_at_unix_seconds: Some(1),
         };
 
-        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+        let resolved = resolve_client_source(Some(&report));
 
         assert_eq!(resolved.country_code.as_deref(), Some("US"));
         assert_eq!(resolved.country.as_deref(), Some("United States"));
         assert_eq!(resolved.country_source, Some("client_report"));
         assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn client_reported_country_name_can_supply_code() {
+        let report = ClientSourceReport {
+            public_ip: "8.8.8.8".to_string(),
+            country_code: None,
+            country: Some("China".to_string()),
+            checked_at_unix_seconds: Some(1),
+        };
+
+        let resolved = resolve_client_source(Some(&report));
+
+        assert_eq!(resolved.country_code.as_deref(), Some("CN"));
+        assert_eq!(resolved.country.as_deref(), Some("China"));
+        assert_eq!(resolved.country_source, Some("client_report"));
     }
 }

@@ -20,14 +20,12 @@ base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
-flate2 = "1"
 http = "1"
 http-body-util = "0.1"
 hmac = "0.12"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 include_dir = "0.7"
-maxminddb = "0.29"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
