@@ -729,12 +729,14 @@ async fn handle_socket(
     let stale_session_after = Duration::from_secs(cfg.stale_session_seconds.max(1));
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let tunnel_traffic = state.tunnel_traffic_counters(&tunnel_id).await;
     let active_session = ActiveSession {
         tunnel_id: tunnel_id.clone(),
         session_id: session_id.clone(),
         tx: frame_tx.clone(),
         last_seen: last_seen.clone(),
         metrics: SessionRuntimeMetrics::default(),
+        tunnel_traffic,
     };
     let mut registered = false;
     let mut disconnect_reason = "client_disconnect";

@@ -1,6 +1,6 @@
 use http_tunnel_common::ServerConfig;
 use http_tunnel_protocol::Frame;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::{
     collections::{HashMap, VecDeque},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -20,6 +20,7 @@ pub struct AppState {
     pub tunnel_create_hits: Arc<RwLock<HashMap<String, VecDeque<Instant>>>>,
     pub admin_login_hits: Arc<RwLock<HashMap<String, VecDeque<Instant>>>>,
     pub per_tunnel_hits: Arc<RwLock<HashMap<String, VecDeque<Instant>>>>,
+    pub tunnel_traffic: Arc<RwLock<HashMap<String, TunnelTrafficCounters>>>,
     pub upgrade_events: broadcast::Sender<String>,
     pub upgrade_lock: Arc<Mutex<()>>,
     pub last_proxy_activity_unix_ms: Arc<AtomicU64>,
@@ -34,6 +35,7 @@ pub struct ActiveSession {
     pub tx: mpsc::Sender<Frame>,
     pub last_seen: Arc<RwLock<Instant>>,
     pub metrics: SessionRuntimeMetrics,
+    pub tunnel_traffic: TunnelTrafficCounters,
 }
 
 impl ActiveSession {
@@ -105,6 +107,48 @@ pub struct RuntimeSessionMetricsSnapshot {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct TunnelTrafficCounters {
+    bytes_in: Arc<AtomicU64>,
+    bytes_out: Arc<AtomicU64>,
+}
+
+impl TunnelTrafficCounters {
+    pub fn add_bytes_in(&self, bytes: usize) {
+        self.add_bytes_in_u64(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    pub fn add_bytes_out(&self, bytes: usize) {
+        self.add_bytes_out_u64(u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    pub fn snapshot(&self) -> TunnelTrafficSnapshot {
+        TunnelTrafficSnapshot {
+            bytes_in: self.bytes_in.load(Ordering::Relaxed),
+            bytes_out: self.bytes_out.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set_at_least(&self, snapshot: TunnelTrafficSnapshot) {
+        update_atomic_max(&self.bytes_in, snapshot.bytes_in);
+        update_atomic_max(&self.bytes_out, snapshot.bytes_out);
+    }
+
+    fn add_bytes_in_u64(&self, bytes: u64) {
+        saturating_add_atomic(&self.bytes_in, bytes);
+    }
+
+    fn add_bytes_out_u64(&self, bytes: u64) {
+        saturating_add_atomic(&self.bytes_out, bytes);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TunnelTrafficSnapshot {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SessionPool {
     pub sessions: Vec<ActiveSession>,
     pub next_index: usize,
@@ -152,6 +196,7 @@ impl AppState {
             tunnel_create_hits: Arc::new(RwLock::new(HashMap::new())),
             admin_login_hits: Arc::new(RwLock::new(HashMap::new())),
             per_tunnel_hits: Arc::new(RwLock::new(HashMap::new())),
+            tunnel_traffic: Arc::new(RwLock::new(HashMap::new())),
             upgrade_events,
             upgrade_lock: Arc::new(Mutex::new(())),
             last_proxy_activity_unix_ms: Arc::new(AtomicU64::new(unix_now_millis())),
@@ -162,6 +207,49 @@ impl AppState {
 
     pub fn next_stream_id(&self) -> u64 {
         self.next_stream_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub async fn initialize_tunnel_traffic_from_request_logs(&self) -> Result<(), sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT tunnel_id, \
+                    COALESCE(SUM(COALESCE(bytes_in, 0)), 0) AS bytes_in, \
+                    COALESCE(SUM(COALESCE(bytes_out, 0)), 0) AS bytes_out \
+             FROM request_logs GROUP BY tunnel_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut traffic = self.tunnel_traffic.write().await;
+        for row in rows {
+            let tunnel_id = row.get::<String, _>("tunnel_id");
+            let counters = traffic.entry(tunnel_id).or_default().clone();
+            counters.set_at_least(TunnelTrafficSnapshot {
+                bytes_in: non_negative_u64(row.get::<i64, _>("bytes_in")),
+                bytes_out: non_negative_u64(row.get::<i64, _>("bytes_out")),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn tunnel_traffic_counters(&self, tunnel_id: &str) -> TunnelTrafficCounters {
+        if let Some(counters) = self.tunnel_traffic.read().await.get(tunnel_id).cloned() {
+            return counters;
+        }
+        self.tunnel_traffic
+            .write()
+            .await
+            .entry(tunnel_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    pub async fn tunnel_traffic_snapshots(&self) -> HashMap<String, TunnelTrafficSnapshot> {
+        self.tunnel_traffic
+            .read()
+            .await
+            .iter()
+            .map(|(tunnel_id, counters)| (tunnel_id.clone(), counters.snapshot()))
+            .collect()
     }
 
     pub async fn register_session(
@@ -437,4 +525,20 @@ fn unix_now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
+}
+
+fn saturating_add_atomic(value: &AtomicU64, amount: u64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
+fn update_atomic_max(value: &AtomicU64, minimum: u64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        (current < minimum).then_some(minimum)
+    });
+}
+
+fn non_negative_u64(value: i64) -> u64 {
+    u64::try_from(value.max(0)).unwrap_or_default()
 }

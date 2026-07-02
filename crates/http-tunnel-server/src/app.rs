@@ -22,6 +22,10 @@ pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<
     let addr = config.addr;
     let pool = db::connect(&config.database_url).await?;
     let state = AppState::new(config_path, config, pool);
+    state
+        .initialize_tunnel_traffic_from_request_logs()
+        .await
+        .context("initialize tunnel traffic counters")?;
     spawn_cleanup_job(state.clone());
     routes::spawn_auto_upgrade_job(state.clone());
 

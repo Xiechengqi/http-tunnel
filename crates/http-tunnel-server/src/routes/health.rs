@@ -1,6 +1,6 @@
 use crate::{
     error::{AppError, Result},
-    state::AppState,
+    state::{AppState, TunnelTrafficSnapshot},
 };
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use http_tunnel_common::{
@@ -245,12 +245,25 @@ async fn public_tunnels(
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
+    let traffic_snapshots = state.tunnel_traffic_snapshots().await;
 
     rows.into_iter()
         .map(|row| {
             let id = row.get::<String, _>("id");
             let subdomain = row.get::<String, _>("subdomain");
             let status = row.get::<String, _>("status");
+            let persisted_traffic = TunnelTrafficSnapshot {
+                bytes_in: non_negative_u64(row.get::<i64, _>("bytes_in")),
+                bytes_out: non_negative_u64(row.get::<i64, _>("bytes_out")),
+            };
+            let traffic = traffic_snapshots
+                .get(&id)
+                .copied()
+                .map(|snapshot| TunnelTrafficSnapshot {
+                    bytes_in: snapshot.bytes_in.max(persisted_traffic.bytes_in),
+                    bytes_out: snapshot.bytes_out.max(persisted_traffic.bytes_out),
+                })
+                .unwrap_or(persisted_traffic);
             let runtime_metrics = runtime.get(&id);
             let active_sessions = runtime_metrics
                 .map(|metrics| metrics.active_sessions)
@@ -296,8 +309,8 @@ async fn public_tunnels(
                 active_streams,
                 request_count: row.get::<i64, _>("request_count"),
                 error_count: row.get::<i64, _>("error_count"),
-                bytes_in: non_negative_u64(row.get::<i64, _>("bytes_in")),
-                bytes_out: non_negative_u64(row.get::<i64, _>("bytes_out")),
+                bytes_in: traffic.bytes_in,
+                bytes_out: traffic.bytes_out,
                 source,
                 last_seen_at: row
                     .try_get::<Option<String>, _>("latest_seen_at")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import {
   Activity,
   BookOpen,
@@ -23,15 +23,25 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { publicApi } from "@/lib/api";
 import type { DashboardPresence, DashboardSummary, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
-import { cn, formatBytes, formatNumber } from "@/lib/utils";
+import { cn, formatBytes, formatBytesPerSecond, formatNumber } from "@/lib/utils";
 
 type StatusFilter = "all" | "online" | "offline";
+type TrafficRate = {
+  inBytesPerSecond: number;
+  outBytesPerSecond: number;
+};
+type TrafficSnapshot = {
+  bytesIn: number;
+  bytesOut: number;
+  capturedAt: number;
+};
 
 const COUNTRY_NAMES = new Map(regions.map((region) => [region.code.toUpperCase(), region.name]));
 const DEFAULT_MAP_OFFSET_RATIO = 0.58;
 const MAP_OFFSET_STORAGE_KEY = "http-tunnel.dashboard.mapOffsetRatio.v1";
 const DISCONNECTED_EXPIRE_MS = 10 * 60 * 1000;
 const EXPIRED_DELETE_MS = 60 * 60 * 1000;
+const EMPTY_TRAFFIC_RATE: TrafficRate = { inBytesPerSecond: 0, outBytesPerSecond: 0 };
 
 export default function PublicDashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -40,6 +50,8 @@ export default function PublicDashboardPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
   const [docsOpen, setDocsOpen] = useState(false);
+  const [trafficRates, setTrafficRates] = useState<Record<string, TrafficRate>>({});
+  const trafficSnapshotsRef = useRef<Record<string, TrafficSnapshot>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -47,8 +59,12 @@ export default function PublicDashboardPage() {
       try {
         const data = await publicApi<DashboardSummary>("/api/v1/dashboard");
         if (!cancelled) {
+          const loadedAt = Date.now();
+          const traffic = calculateTrafficRates(data.tunnels, trafficSnapshotsRef.current, loadedAt);
+          trafficSnapshotsRef.current = traffic.snapshots;
+          setTrafficRates(traffic.rates);
           setSummary(data);
-          setLastLoadedAt(new Date());
+          setLastLoadedAt(new Date(loadedAt));
           setError("");
         }
       } catch (err) {
@@ -186,7 +202,7 @@ export default function PublicDashboardPage() {
                 </div>
               </CardHeader>
               <CardContent className="p-0">
-                <TunnelTable tunnels={filteredTunnels} />
+                <TunnelTable tunnels={filteredTunnels} trafficRates={trafficRates} />
               </CardContent>
             </Card>
           </>
@@ -196,6 +212,44 @@ export default function PublicDashboardPage() {
       {docsOpen ? <ClientDocsModal serverUrl={summary?.server_url} githubProxy={summary?.github_proxy} onClose={() => setDocsOpen(false)} /> : null}
     </div>
   );
+}
+
+function calculateTrafficRates(
+  tunnels: PublicTunnel[],
+  previous: Record<string, TrafficSnapshot>,
+  capturedAt: number,
+) {
+  const rates: Record<string, TrafficRate> = {};
+  const snapshots: Record<string, TrafficSnapshot> = {};
+
+  for (const tunnel of tunnels) {
+    const key = tunnelTrafficKey(tunnel);
+    const bytesIn = safeTrafficBytes(tunnel.bytes_in);
+    const bytesOut = safeTrafficBytes(tunnel.bytes_out);
+    const last = previous[key];
+    snapshots[key] = { bytesIn, bytesOut, capturedAt };
+
+    if (!last) {
+      rates[key] = { ...EMPTY_TRAFFIC_RATE };
+      continue;
+    }
+
+    const elapsedSeconds = Math.max((capturedAt - last.capturedAt) / 1000, 1);
+    rates[key] = {
+      inBytesPerSecond: Math.max(0, bytesIn - last.bytesIn) / elapsedSeconds,
+      outBytesPerSecond: Math.max(0, bytesOut - last.bytesOut) / elapsedSeconds,
+    };
+  }
+
+  return { rates, snapshots };
+}
+
+function tunnelTrafficKey(tunnel: PublicTunnel) {
+  return tunnel.subdomain;
+}
+
+function safeTrafficBytes(value: number | null | undefined) {
+  return Number.isFinite(value) ? Math.max(0, value || 0) : 0;
 }
 
 function PresenceFooter() {
@@ -605,13 +659,19 @@ function countryStyle(context: CountryContext<number>, maxClients: number) {
   };
 }
 
-function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
+function TunnelTable({
+  tunnels,
+  trafficRates,
+}: {
+  tunnels: PublicTunnel[];
+  trafficRates: Record<string, TrafficRate>;
+}) {
   if (tunnels.length === 0) {
     return <div className="p-4"><EmptyState label="No tunnels matched" /></div>;
   }
   return (
     <div className="overflow-x-auto">
-      <Table className="min-w-[980px]">
+      <Table className="min-w-[1160px]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-[260px]">Tunnel</TableHead>
@@ -619,62 +679,87 @@ function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
             <TableHead className="w-24 text-right">Sessions</TableHead>
             <TableHead className="w-24 text-right">Streams</TableHead>
             <TableHead className="w-28 text-right">Requests</TableHead>
-            <TableHead className="w-32 text-right">Traffic</TableHead>
+            <TableHead className="w-40 text-right">In</TableHead>
+            <TableHead className="w-40 text-right">Out</TableHead>
             <TableHead className="w-36">Last seen</TableHead>
             <TableHead className="w-40">Lifecycle</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {tunnels.map((tunnel) => (
-            <TableRow key={tunnel.subdomain}>
-              <TableCell>
-                <div className="flex items-start gap-3">
-                  <span className={cn("mt-1.5 h-2.5 w-2.5 rounded-full", tunnel.connected ? "bg-emerald-400" : "bg-slate-500")} />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-medium">{tunnel.subdomain}</span>
-                      <Badge variant={tunnel.connected ? "healthy" : "muted"}>{tunnel.status}</Badge>
+          {tunnels.map((tunnel) => {
+            const rate = trafficRates[tunnelTrafficKey(tunnel)] || EMPTY_TRAFFIC_RATE;
+            return (
+              <TableRow key={tunnel.subdomain}>
+                <TableCell>
+                  <div className="flex items-start gap-3">
+                    <span className={cn("mt-1.5 h-2.5 w-2.5 rounded-full", tunnel.connected ? "bg-emerald-400" : "bg-slate-500")} />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium">{tunnel.subdomain}</span>
+                        <Badge variant={tunnel.connected ? "healthy" : "muted"}>{tunnel.status}</Badge>
+                      </div>
+                      <a
+                        href={tunnel.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-flex max-w-[220px] items-center gap-1 truncate text-xs text-muted-foreground no-underline hover:text-primary"
+                      >
+                        {tunnel.url}
+                        <ExternalLink className="h-3 w-3 shrink-0" />
+                      </a>
                     </div>
-                    <a
-                      href={tunnel.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-flex max-w-[220px] items-center gap-1 truncate text-xs text-muted-foreground no-underline hover:text-primary"
-                    >
-                      {tunnel.url}
-                      <ExternalLink className="h-3 w-3 shrink-0" />
-                    </a>
                   </div>
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center gap-2">
-                  <Globe2 className={cn("h-4 w-4", tunnel.source.located ? "text-primary" : "text-muted-foreground")} />
-                  <span className="max-w-[220px] truncate">{sourceLabel(tunnel)}</span>
-                </div>
-              </TableCell>
-              <TableCell className="text-right">{formatNumber(tunnel.active_sessions)}</TableCell>
-              <TableCell className="text-right">{formatNumber(tunnel.active_streams)}</TableCell>
-              <TableCell className="text-right">
-                <div>{formatNumber(tunnel.request_count)}</div>
-                {tunnel.error_count ? <div className="text-xs text-red-700 dark:text-red-300">{formatNumber(tunnel.error_count)} errors</div> : null}
-              </TableCell>
-              <TableCell className="text-right">
-                <div className="inline-flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                  <Activity className="h-3.5 w-3.5" />
-                  {formatBytes(tunnel.bytes_in)}
-                </div>
-                <div className="inline-flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                  <Waves className="h-3.5 w-3.5" />
-                  {formatBytes(tunnel.bytes_out)}
-                </div>
-              </TableCell>
-              <TableCell>{formatDate(tunnel.last_seen_at)}</TableCell>
-              <TableCell><TunnelLifecycle tunnel={tunnel} /></TableCell>
-            </TableRow>
-          ))}
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Globe2 className={cn("h-4 w-4", tunnel.source.located ? "text-primary" : "text-muted-foreground")} />
+                    <span className="max-w-[220px] truncate">{sourceLabel(tunnel)}</span>
+                  </div>
+                </TableCell>
+                <TableCell className="text-right">{formatNumber(tunnel.active_sessions)}</TableCell>
+                <TableCell className="text-right">{formatNumber(tunnel.active_streams)}</TableCell>
+                <TableCell className="text-right">
+                  <div>{formatNumber(tunnel.request_count)}</div>
+                  {tunnel.error_count ? <div className="text-xs text-red-700 dark:text-red-300">{formatNumber(tunnel.error_count)} errors</div> : null}
+                </TableCell>
+                <TableCell className="text-right">
+                  <TrafficCell
+                    icon={<Activity className="h-3.5 w-3.5" />}
+                    rate={rate.inBytesPerSecond}
+                    total={tunnel.bytes_in}
+                  />
+                </TableCell>
+                <TableCell className="text-right">
+                  <TrafficCell
+                    icon={<Waves className="h-3.5 w-3.5" />}
+                    rate={rate.outBytesPerSecond}
+                    total={tunnel.bytes_out}
+                  />
+                </TableCell>
+                <TableCell>{formatDate(tunnel.last_seen_at)}</TableCell>
+                <TableCell><TunnelLifecycle tunnel={tunnel} /></TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
+    </div>
+  );
+}
+
+function TrafficCell({
+  icon,
+  rate,
+  total,
+}: {
+  icon: ReactNode;
+  rate: number;
+  total: number;
+}) {
+  return (
+    <div className="inline-flex items-center justify-end gap-1 whitespace-nowrap text-xs text-muted-foreground">
+      {icon}
+      <span>{formatBytesPerSecond(rate)} / {formatBytes(total)}</span>
     </div>
   );
 }

@@ -690,6 +690,7 @@ async fn replay_request(
         .await?;
         if !body.is_empty() {
             session.metrics.add_bytes_in(body.len());
+            session.tunnel_traffic.add_bytes_in(body.len());
             crate::routes::proxy::send_frame(
                 session,
                 Frame::new(FrameType::RequestBody, stream_id, body),
@@ -724,6 +725,7 @@ async fn replay_request(
             match frame.frame_type {
                 FrameType::ResponseBody => {
                     session.metrics.add_bytes_out(frame.payload.len());
+                    session.tunnel_traffic.add_bytes_out(frame.payload.len());
                     push_preview(
                         &frame.payload,
                         preview_limit,

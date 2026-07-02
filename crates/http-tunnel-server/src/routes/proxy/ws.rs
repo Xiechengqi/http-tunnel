@@ -339,6 +339,7 @@ async fn relay_public_ws<S>(
                 TungsteniteMessage::Text(text) => {
                     browser_bytes_in.fetch_add(text.len() as i64, Ordering::Relaxed);
                     session_to_client.metrics.add_bytes_in(text.len());
+                    session_to_client.tunnel_traffic.add_bytes_in(text.len());
                     browser_message_count.fetch_add(1, Ordering::Relaxed);
                     Frame::new(
                         FrameType::WsMessage,
@@ -349,6 +350,7 @@ async fn relay_public_ws<S>(
                 TungsteniteMessage::Binary(bytes) => {
                     browser_bytes_in.fetch_add(bytes.len() as i64, Ordering::Relaxed);
                     session_to_client.metrics.add_bytes_in(bytes.len());
+                    session_to_client.tunnel_traffic.add_bytes_in(bytes.len());
                     browser_message_count.fetch_add(1, Ordering::Relaxed);
                     Frame::new(
                         FrameType::WsMessage,
@@ -455,12 +457,14 @@ async fn relay_public_ws<S>(
                         let text = String::from_utf8_lossy(payload).to_string();
                         bytes_out.fetch_add(payload.len() as i64, Ordering::Relaxed);
                         session.metrics.add_bytes_out(payload.len());
+                        session.tunnel_traffic.add_bytes_out(payload.len());
                         message_count.fetch_add(1, Ordering::Relaxed);
                         browser_tx.send(TungsteniteMessage::Text(text)).await
                     }
                     WsMessageKind::Binary => {
                         bytes_out.fetch_add(payload.len() as i64, Ordering::Relaxed);
                         session.metrics.add_bytes_out(payload.len());
+                        session.tunnel_traffic.add_bytes_out(payload.len());
                         message_count.fetch_add(1, Ordering::Relaxed);
                         browser_tx
                             .send(TungsteniteMessage::Binary(payload.to_vec()))

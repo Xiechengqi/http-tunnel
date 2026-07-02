@@ -134,6 +134,7 @@ pub async fn forward_to_tunnel(
             };
             bytes_in = bytes_in.saturating_add(data.len());
             session.metrics.add_bytes_in(data.len());
+            session.tunnel_traffic.add_bytes_in(data.len());
             inspection.push_request_body(&data);
             if bytes_in > max_body_bytes {
                 let _ = super::send_frame(
@@ -207,6 +208,9 @@ pub async fn forward_to_tunnel(
                                 i64::try_from(frame.payload.len()).unwrap_or(i64::MAX),
                             );
                             cleanup_session.metrics.add_bytes_out(frame.payload.len());
+                            cleanup_session
+                                .tunnel_traffic
+                                .add_bytes_out(frame.payload.len());
                             inspection.push_response_body(&frame.payload);
                             if body_tx.send(Ok(Bytes::from(frame.payload))).await.is_err() {
                                 let _ = super::send_frame(

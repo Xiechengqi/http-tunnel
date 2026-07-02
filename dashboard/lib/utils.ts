@@ -25,6 +25,16 @@ export function formatBytes(value: number | null | undefined) {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`;
 }
 
+export function formatBytesPerSecond(value: number | null | undefined) {
+  const raw = value ?? 0;
+  const bytes = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+  if (bytes < 1024) {
+    const precision = bytes > 0 && bytes < 10 ? 1 : 0;
+    return `${bytes.toFixed(precision)} B/s`;
+  }
+  return `${formatBytes(bytes)}/s`;
+}
+
 export function formatDuration(seconds: number | null | undefined) {
   const value = Math.max(0, seconds ?? 0);
   const days = Math.floor(value / 86400);
