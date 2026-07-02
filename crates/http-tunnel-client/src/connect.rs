@@ -1,7 +1,10 @@
 use crate::{
     config::{clear_stored_tunnel, ensure_client_identity, save_config_file, ClientConfig},
     http_forward::forward_one_request,
-    runtime::{clear_disconnect_request, disconnect_requested, write_status, RuntimeStatus},
+    runtime::{
+        acquire_instance_lock, clear_disconnect_request, disconnect_requested, write_status,
+        RuntimeInstanceLock, RuntimeStatus,
+    },
     ws_forward::{forward_one_websocket, frame_to_ws_close, frame_to_ws_message},
 };
 use anyhow::Context;
@@ -55,13 +58,15 @@ struct PendingWs {
 const CLIENT_SOURCE_UPDATE_CAPABILITY: &str = "client_source_update";
 const DEFAULT_PUBLIC_IP_REFRESH_SECONDS: u64 = 3600;
 const MIN_PUBLIC_IP_REFRESH_SECONDS: u64 = 60;
-const PUBLIC_IP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+const PUBLIC_IP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_PUBLIC_IP_LOOKUP_URLS: &[&str] = &[
     "http://3.0.3.0",
     "https://api64.ipify.org?format=json",
     "https://api.ipify.org?format=json",
 ];
-const DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE: &str = "https://ipwho.is/{ip}";
+const DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATES: &[&str] =
+    &["https://ipwho.is/{ip}", "https://api.country.is/{ip}"];
+const DUPLICATE_REPLACED_REASON: &str = "duplicate_replaced";
 
 #[derive(Debug, Clone)]
 struct PublicIpLookup {
@@ -130,6 +135,36 @@ pub async fn connect(
     mut cfg: ClientConfig,
     json_events: bool,
 ) -> anyhow::Result<()> {
+    let _instance_lock = match acquire_instance_lock(&server, &target, subdomain.as_deref())? {
+        RuntimeInstanceLock::Acquired(lock) => Some(lock),
+        RuntimeInstanceLock::Skipped => None,
+        RuntimeInstanceLock::Active(active) => {
+            if json_events {
+                emit_client_event(
+                    json_events,
+                    "duplicate_instance",
+                    &serde_json::json!({
+                        "pid": active.pid,
+                        "server": active.server,
+                        "subdomain": active.subdomain,
+                        "target": active.target,
+                        "message": duplicate_instance_message(&active.server, &active.subdomain, &active.target, active.pid),
+                    }),
+                )?;
+            } else {
+                eprintln!(
+                    "{}",
+                    duplicate_instance_message(
+                        &active.server,
+                        &active.subdomain,
+                        &active.target,
+                        active.pid
+                    )
+                );
+            }
+            return Ok(());
+        }
+    };
     let client = reqwest::Client::new();
     if ensure_client_identity(&mut cfg) {
         if let Err(error) = save_config_file(&cfg) {
@@ -243,6 +278,28 @@ pub async fn connect(
                 reconnect_token = token;
                 apply_runtime_stats(&mut runtime_status, false, &stats);
                 let _ = write_status(&runtime_status);
+                if duplicate_replaced(&stats) {
+                    if json_events {
+                        emit_client_event(json_events, "disconnected", &stats)?;
+                        emit_client_event(
+                            json_events,
+                            "duplicate_replaced",
+                            &serde_json::json!({
+                                "message": duplicate_replaced_message(),
+                            }),
+                        )?;
+                    } else {
+                        println!(
+                            "disconnected; active_streams={} bytes_in={} bytes_out={} reason={}",
+                            stats.active_streams,
+                            stats.bytes_in,
+                            stats.bytes_out,
+                            stats.last_disconnect_reason.as_deref().unwrap_or("unknown"),
+                        );
+                        eprintln!("{}", duplicate_replaced_message());
+                    }
+                    break;
+                }
                 if json_events {
                     emit_client_event(json_events, "disconnected", &stats)?;
                     emit_client_event(
@@ -335,6 +392,20 @@ pub async fn connect(
     clear_disconnect_request();
     emit_client_event(json_events, "exit", &runtime_status)?;
     Ok(())
+}
+
+fn duplicate_instance_message(server: &str, subdomain: &str, target: &str, pid: u32) -> String {
+    format!(
+        "another http-tunnel-client is already running for server={server}, subdomain={subdomain}, target={target} (pid {pid}); exiting"
+    )
+}
+
+fn duplicate_replaced(stats: &ConnectionStats) -> bool {
+    stats.last_disconnect_reason.as_deref() == Some(DUPLICATE_REPLACED_REASON)
+}
+
+fn duplicate_replaced_message() -> &'static str {
+    "another client connected to the same tunnel, so this client will exit instead of reconnecting"
 }
 
 fn stored_tunnel_error_is_terminal(error: &anyhow::Error) -> bool {
@@ -742,7 +813,7 @@ fn log_client_source_result(
                 "country": report.and_then(|report| report.country.as_deref()),
                 "checked_at_unix_seconds": report.and_then(|report| report.checked_at_unix_seconds),
                 "lookup_urls": &public_ip_lookup.urls,
-                "country_lookup_url": DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE,
+                "country_lookup_urls": country_lookup_urls_for_report(report),
             }),
         )?;
         return Ok(());
@@ -751,19 +822,32 @@ fn log_client_source_result(
     let lookup_urls = public_ip_lookup.urls.join(",");
     if let Some(report) = report {
         println!(
-            "client source ({phase}): ip={} country_code={} country={} lookup_urls={lookup_urls} country_lookup_url={}",
+            "client source ({phase}): ip={} country_code={} country={} lookup_urls={lookup_urls} country_lookup_urls={}",
             report.public_ip,
             report.country_code.as_deref().unwrap_or("unknown"),
             report.country.as_deref().unwrap_or("unknown"),
-            DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE,
+            country_lookup_urls_for_report(Some(report)).join(","),
         );
     } else {
         println!(
-            "client source ({phase}): unavailable lookup_urls={lookup_urls} country_lookup_url={}",
-            DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE
+            "client source ({phase}): unavailable lookup_urls={lookup_urls} country_lookup_urls={}",
+            country_lookup_urls_for_report(None).join(",")
         );
     }
     Ok(())
+}
+
+fn country_lookup_urls_for_report(report: Option<&ClientSourceReport>) -> Vec<String> {
+    let Some(public_ip) = report.map(|report| report.public_ip.as_str()) else {
+        return DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATES
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect();
+    };
+    DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATES
+        .iter()
+        .map(|template| public_ip_country_lookup_url(template, public_ip))
+        .collect()
 }
 
 fn apply_runtime_stats(
@@ -866,52 +950,55 @@ async fn lookup_public_ip_country(
     public_ip: &str,
 ) -> Option<PublicIpLookupResponse> {
     let requested_ip = parse_public_ip(public_ip)?;
-    let url = public_ip_country_lookup_url(public_ip);
-    let request = client.get(&url);
-    let response = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, request.send()).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            tracing::debug!(%url, %error, "public IP country lookup request failed");
-            return None;
+    for template in DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATES {
+        let url = public_ip_country_lookup_url(template, public_ip);
+        let request = client.get(&url);
+        let response = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                tracing::debug!(%url, %error, "public IP country lookup request failed");
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!(%url, "public IP country lookup request timed out");
+                continue;
+            }
+        };
+        let body = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, response.text()).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(error)) => {
+                tracing::debug!(%url, %error, "public IP country lookup response read failed");
+                continue;
+            }
+            Err(_) => {
+                tracing::debug!(%url, "public IP country lookup response read timed out");
+                continue;
+            }
+        };
+        let mut parsed = parse_public_ip_response(&body);
+        if let Some(response_ip) = parsed.public_ip.as_deref().and_then(parse_public_ip) {
+            if response_ip != requested_ip {
+                tracing::debug!(
+                    %url,
+                    requested_ip = %requested_ip,
+                    response_ip = %response_ip,
+                    "public IP country lookup returned mismatched IP"
+                );
+                continue;
+            }
         }
-        Err(_) => {
-            tracing::debug!(%url, "public IP country lookup request timed out");
-            return None;
+        if parsed.country_code.is_none() && parsed.country.is_none() {
+            tracing::debug!(%url, "public IP country lookup returned no country");
+            continue;
         }
-    };
-    let body = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, response.text()).await {
-        Ok(Ok(body)) => body,
-        Ok(Err(error)) => {
-            tracing::debug!(%url, %error, "public IP country lookup response read failed");
-            return None;
-        }
-        Err(_) => {
-            tracing::debug!(%url, "public IP country lookup response read timed out");
-            return None;
-        }
-    };
-    let mut parsed = parse_public_ip_response(&body);
-    if let Some(response_ip) = parsed.public_ip.as_deref().and_then(parse_public_ip) {
-        if response_ip != requested_ip {
-            tracing::debug!(
-                %url,
-                requested_ip = %requested_ip,
-                response_ip = %response_ip,
-                "public IP country lookup returned mismatched IP"
-            );
-            return None;
-        }
+        parsed.public_ip = Some(requested_ip.to_string());
+        return Some(parsed);
     }
-    if parsed.country_code.is_none() && parsed.country.is_none() {
-        tracing::debug!(%url, "public IP country lookup returned no country");
-        return None;
-    }
-    parsed.public_ip = Some(requested_ip.to_string());
-    Some(parsed)
+    None
 }
 
-fn public_ip_country_lookup_url(public_ip: &str) -> String {
-    DEFAULT_PUBLIC_IP_COUNTRY_LOOKUP_URL_TEMPLATE.replace("{ip}", public_ip)
+fn public_ip_country_lookup_url(template: &str, public_ip: &str) -> String {
+    template.replace("{ip}", public_ip)
 }
 
 fn parse_public_ip_response(body: &str) -> PublicIpLookupResponse {
@@ -1041,6 +1128,19 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_replaced_disconnect_is_terminal() {
+        assert!(duplicate_replaced(&ConnectionStats {
+            last_disconnect_reason: Some("duplicate_replaced".to_string()),
+            ..ConnectionStats::default()
+        }));
+        assert!(!duplicate_replaced(&ConnectionStats {
+            last_disconnect_reason: Some("websocket_closed".to_string()),
+            ..ConnectionStats::default()
+        }));
+        assert!(!duplicate_replaced(&ConnectionStats::default()));
+    }
+
+    #[test]
     fn parses_public_ip_lookup_responses() {
         assert_eq!(
             parse_public_ip_response(r#"{"ip":"183.193.183.90","location":"x"}"#),
@@ -1102,8 +1202,28 @@ mod tests {
     #[test]
     fn builds_public_ip_country_lookup_urls() {
         assert_eq!(
-            public_ip_country_lookup_url("2409:8a1e:c920:d640:b073:49ff:fee4:a804"),
+            public_ip_country_lookup_url(
+                "https://ipwho.is/{ip}",
+                "2409:8a1e:c920:d640:b073:49ff:fee4:a804"
+            ),
             "https://ipwho.is/2409:8a1e:c920:d640:b073:49ff:fee4:a804"
+        );
+        assert_eq!(
+            public_ip_country_lookup_url(
+                "https://api.country.is/{ip}",
+                "2409:8a1e:c920:d640:b073:49ff:fee4:a804"
+            ),
+            "https://api.country.is/2409:8a1e:c920:d640:b073:49ff:fee4:a804"
+        );
+        assert_eq!(
+            parse_public_ip_response(
+                r#"{"ip":"2409:8a1e:c920:d640:b073:49ff:fee4:a804","country":"CN"}"#,
+            ),
+            PublicIpLookupResponse {
+                public_ip: Some("2409:8a1e:c920:d640:b073:49ff:fee4:a804".to_string()),
+                country_code: Some("CN".to_string()),
+                country: None,
+            }
         );
     }
 }

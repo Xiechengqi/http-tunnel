@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import {
   Activity,
   BookOpen,
@@ -262,35 +262,154 @@ function TunnelSourceMap({
   totalClients: number;
   unknownClients: number;
 }) {
-  const [mapFrameRef, mapFrameWidth] = useElementWidth<HTMLDivElement>();
-  const data = countries
-    .filter((country) => country.country_code)
-    .map((country) => ({
-      country: country.country_code.toLowerCase(),
-      value: country.client_count,
-    })) as DataItem<number>[];
-  const countryMeta = new Map(countries.map((country) => [country.country_code.toUpperCase(), country]));
+  const mapRootRef = useRef<HTMLDivElement | null>(null);
+  const [mapFrameRef, mapFrameSize] = useElementSize<HTMLDivElement>();
+  const dragRef = useRef<MapDragState | null>(null);
+  const offsetInitializedRef = useRef(false);
+  const [tooltip, setTooltip] = useState<MapTooltipState | null>(null);
+  const [mapOffsetY, setMapOffsetY] = useState(0);
+  const countryMeta = useMemo(
+    () => new Map(countries.map((country) => [country.country_code.toUpperCase(), country])),
+    [countries],
+  );
+  const data = useMemo(
+    () =>
+      regions.map((region) => ({
+        country: region.code.toLowerCase(),
+        value: countryMeta.get(region.code.toUpperCase())?.client_count || 0,
+      })) as DataItem<number>[],
+    [countryMeta],
+  );
   const maxClients = countries.reduce((max, country) => Math.max(max, country.client_count), 0);
+  const mapFrameWidth = mapFrameSize.width;
   const mapSize = Math.max(640, Math.ceil(mapFrameWidth || 960));
+  const mapVisualHeight = mapSize * 0.75;
+  const maxMapOffsetY = Math.max(0, (mapVisualHeight - mapFrameSize.height) / 2);
+  const defaultMapOffsetY = maxMapOffsetY * 0.58;
+
+  useEffect(() => {
+    if (mapFrameSize.height <= 0) return;
+    setMapOffsetY((current) => {
+      if (!offsetInitializedRef.current) {
+        offsetInitializedRef.current = true;
+        return defaultMapOffsetY;
+      }
+      return clamp(current, -maxMapOffsetY, maxMapOffsetY);
+    });
+  }, [defaultMapOffsetY, mapFrameSize.height, maxMapOffsetY]);
+
+  function showTooltip(event: PointerEvent<HTMLDivElement>) {
+    const root = mapRootRef.current;
+    const target = event.target instanceof Element ? event.target.closest("path") : null;
+    if (!root || !target || !root.contains(target)) {
+      setTooltip(null);
+      return;
+    }
+
+    const svg = target.ownerSVGElement;
+    if (!svg) {
+      setTooltip(null);
+      return;
+    }
+
+    const regionIndex = Array.from(svg.querySelectorAll("path")).indexOf(target as SVGPathElement);
+    const region = regions[regionIndex];
+    if (!region) {
+      setTooltip(null);
+      return;
+    }
+
+    const code = region.code.toUpperCase();
+    const source = countryMeta.get(code);
+    const bounds = root.getBoundingClientRect();
+    setTooltip({
+      code,
+      name: source?.country || COUNTRY_NAMES.get(code) || region.name || code,
+      clientCount: source?.client_count || 0,
+      tunnelCount: source?.tunnel_count || 0,
+      x: event.clientX - bounds.left,
+      y: event.clientY - bounds.top,
+    });
+  }
+
+  function startMapDrag(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startOffsetY: mapOffsetY,
+    };
+    setTooltip(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveMapPointer(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      const nextOffset = clamp(drag.startOffsetY + event.clientY - drag.startY, -maxMapOffsetY, maxMapOffsetY);
+      setMapOffsetY(nextOffset);
+      setTooltip(null);
+      event.preventDefault();
+      return;
+    }
+    showTooltip(event);
+  }
+
+  function stopMapDrag(event: PointerEvent<HTMLDivElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
 
   return (
-    <div className="relative h-[clamp(320px,48vw,620px)] overflow-hidden border-t border-border bg-sky-50 dark:bg-[#07111f]">
-      <div ref={mapFrameRef} className="absolute inset-x-0 bottom-9 top-0 flex -translate-y-3 items-center justify-center overflow-hidden px-2 md:bottom-10">
-        <WorldMap
-          data={data}
-          color="#0A94F2"
-          size={mapSize}
-          frame={false}
-          backgroundColor="transparent"
-          borderColor="rgba(14, 116, 144, 0.22)"
-          tooltipBgColor="hsl(var(--popover))"
-          tooltipTextColor="hsl(var(--popover-foreground))"
-          richInteraction
-          containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
-          tooltipTextFunction={(context) => countryTooltip(context, countryMeta)}
-          styleFunction={(context) => countryStyle(context, maxClients)}
-        />
+    <div
+      ref={mapRootRef}
+      className="relative h-[clamp(160px,24vw,310px)] touch-none overflow-hidden border-t border-border bg-sky-50 select-none dark:bg-[#07111f]"
+      onPointerDown={startMapDrag}
+      onPointerMove={moveMapPointer}
+      onPointerUp={stopMapDrag}
+      onPointerCancel={stopMapDrag}
+      onLostPointerCapture={stopMapDrag}
+      onPointerLeave={(event) => {
+        if (dragRef.current?.pointerId !== event.pointerId) setTooltip(null);
+      }}
+    >
+      <div ref={mapFrameRef} className="absolute inset-x-0 bottom-9 top-0 flex items-center justify-center overflow-hidden px-2 md:bottom-10">
+        <div className="cursor-grab active:cursor-grabbing" style={{ transform: `translateY(${mapOffsetY}px)` }}>
+          <WorldMap
+            data={data}
+            color="#0A94F2"
+            size={mapSize}
+            frame={false}
+            backgroundColor="transparent"
+            borderColor="rgba(14, 116, 144, 0.22)"
+            containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
+            tooltipTextFunction={() => ""}
+            styleFunction={(context) => countryStyle(context, maxClients)}
+          />
+        </div>
       </div>
+      {tooltip ? (
+        <div
+          className="pointer-events-none absolute z-10 w-44 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg"
+          style={{
+            left: tooltip.x,
+            top: tooltip.y,
+            transform: tooltip.x > (mapFrameWidth || mapSize) - 220 ? "translate(-100%, 12px)" : "translate(12px, 12px)",
+          }}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="truncate font-medium">{tooltip.name}</span>
+            <span className="shrink-0 text-muted-foreground">{tooltip.code}</span>
+          </div>
+          <div className="mt-1 grid gap-0.5 text-muted-foreground">
+            <span>Clients: {formatNumber(tooltip.clientCount)}</span>
+            <span>Tunnels: {formatNumber(tooltip.tunnelCount)}</span>
+          </div>
+        </div>
+      ) : null}
       <div className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
           <span className="h-2.5 w-10 rounded-sm bg-gradient-to-r from-sky-100 to-sky-500 ring-1 ring-border" />
@@ -309,9 +428,24 @@ function TunnelSourceMap({
   );
 }
 
-function useElementWidth<T extends HTMLElement>() {
+type MapTooltipState = {
+  code: string;
+  name: string;
+  clientCount: number;
+  tunnelCount: number;
+  x: number;
+  y: number;
+};
+
+type MapDragState = {
+  pointerId: number;
+  startY: number;
+  startOffsetY: number;
+};
+
+function useElementSize<T extends HTMLElement>() {
   const ref = useRef<T | null>(null);
-  const [width, setWidth] = useState(0);
+  const [size, setSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
     const node = ref.current;
@@ -321,7 +455,11 @@ function useElementWidth<T extends HTMLElement>() {
     const update = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        setWidth(Math.round(node.getBoundingClientRect().width));
+        const rect = node.getBoundingClientRect();
+        setSize({
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        });
       });
     };
 
@@ -344,16 +482,11 @@ function useElementWidth<T extends HTMLElement>() {
     };
   }, []);
 
-  return [ref, width] as const;
+  return [ref, size] as const;
 }
 
-function countryTooltip(context: CountryContext<number>, countryMeta: Map<string, PublicTunnelCountrySource>) {
-  const code = context.countryCode.toUpperCase();
-  const source = countryMeta.get(code);
-  const name = source?.country || COUNTRY_NAMES.get(code) || context.countryName || code;
-  return `${name}
-Clients: ${formatNumber(source?.client_count || 0)}
-Tunnels: ${formatNumber(source?.tunnel_count || 0)}`;
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function countryStyle(context: CountryContext<number>, maxClients: number) {
@@ -363,7 +496,7 @@ function countryStyle(context: CountryContext<number>, maxClients: number) {
       fill: "rgba(186, 230, 253, 0.34)",
       stroke: "rgba(14, 116, 144, 0.22)",
       strokeWidth: 0.6,
-      cursor: "default",
+      cursor: "grab",
     };
   }
   const intensity = Math.max(0.22, Math.min(1, value / maxClients));
@@ -371,7 +504,7 @@ function countryStyle(context: CountryContext<number>, maxClients: number) {
     fill: `rgba(10, 148, 242, ${0.28 + intensity * 0.62})`,
     stroke: "rgba(7, 89, 133, 0.42)",
     strokeWidth: 0.8,
-    cursor: "pointer",
+    cursor: "grab",
   };
 }
 
