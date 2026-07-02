@@ -1,8 +1,8 @@
 /target/
 /data/
 /.http-tunnel/
-/crates/http-tunnel-server/public/build-info.json
-/crates/http-tunnel-server/public/_next/
+/crates/http-tunnel-server/public/*
+!/crates/http-tunnel-server/public/.gitkeep
 /crates/http-tunnel-server/assets/GeoIP-Country.mmdb
 /crates/http-tunnel-server/assets/GeoIP-Country.mmdb.gz
 /dashboard/.next/
@@ -11,6 +11,7 @@
 /dashboard/tsconfig.tsbuildinfo
 /http-tunnel-client
 /http-tunnel-server
+/run.sh
 
 *.sqlite
 *.sqlite3

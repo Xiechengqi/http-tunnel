@@ -13,6 +13,7 @@ if (!existsSync(out)) {
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
 cpSync(out, target, { recursive: true });
+writeFileSync(resolve(target, ".gitkeep"), "");
 
 writeFileSync(
   resolve(target, "build-info.json"),
