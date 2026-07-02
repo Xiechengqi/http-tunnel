@@ -1,13 +1,18 @@
-use crate::state::AppState;
+use crate::{
+    error::{AppError, Result},
+    state::AppState,
+};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use http_tunnel_common::{
     api::ApiResponse, build_info::BuildInfo, country::normalize_country_code,
 };
-use serde::Serialize;
-use sqlx::Row;
+use serde::{Deserialize, Serialize};
+use sqlx::{Row, SqlitePool};
 use std::{collections::HashMap, net::IpAddr, time::UNIX_EPOCH};
 
 const MAX_PUBLIC_TUNNELS: i64 = 2_000;
+const DASHBOARD_PRESENCE_WINDOW_SECONDS: i64 = 30;
+const MAX_DASHBOARD_PRESENCE_SESSION_ID_LEN: usize = 128;
 
 #[derive(Debug, Serialize)]
 pub struct Health {
@@ -36,6 +41,16 @@ pub struct DashboardSummary {
     pub stats: DashboardStats,
     pub tunnels: Vec<PublicTunnel>,
     pub country_sources: Vec<PublicTunnelCountrySource>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DashboardPresenceRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardPresence {
+    pub online_count: usize,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -119,6 +134,14 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
         tunnels,
         country_sources,
     }))
+}
+
+pub async fn dashboard_presence(
+    State(state): State<AppState>,
+    Json(input): Json<DashboardPresenceRequest>,
+) -> Result<Json<ApiResponse<DashboardPresence>>> {
+    let online_count = record_dashboard_presence(&state.pool, &input.session_id).await?;
+    Ok(Json(ApiResponse::ok(DashboardPresence { online_count })))
 }
 
 fn dashboard_server_url(cfg: &http_tunnel_common::ServerConfig) -> Option<String> {
@@ -456,4 +479,120 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+fn unix_now_i64() -> i64 {
+    i64::try_from(unix_now()).unwrap_or(i64::MAX)
+}
+
+async fn record_dashboard_presence(pool: &SqlitePool, session_id: &str) -> Result<usize> {
+    let session_id = normalize_presence_session_id(session_id)?;
+    let now = unix_now_i64();
+    let cutoff = now.saturating_sub(DASHBOARD_PRESENCE_WINDOW_SECONDS);
+
+    sqlx::query(
+        "INSERT INTO dashboard_presence (session_id, last_seen_at) \
+         VALUES (?1, ?2) \
+         ON CONFLICT(session_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+    )
+    .bind(&session_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(AppError::internal)?;
+
+    sqlx::query("DELETE FROM dashboard_presence WHERE last_seen_at < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await
+        .map_err(AppError::internal)?;
+
+    let online_count =
+        sqlx::query("SELECT COUNT(*) AS count FROM dashboard_presence WHERE last_seen_at >= ?1")
+            .bind(cutoff)
+            .fetch_one(pool)
+            .await
+            .map_err(AppError::internal)?
+            .get::<i64, _>("count");
+
+    Ok(usize::try_from(online_count.max(0)).unwrap_or_default())
+}
+
+fn normalize_presence_session_id(session_id: &str) -> Result<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_session_id",
+            "session_id is required",
+        ));
+    }
+    if session_id.len() > MAX_DASHBOARD_PRESENCE_SESSION_ID_LEN {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_session_id",
+            "session_id is too long",
+        ));
+    }
+    Ok(session_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[test]
+    fn validates_presence_session_id() {
+        let session_id = normalize_presence_session_id(" demo-session ").unwrap();
+        assert_eq!(session_id, "demo-session");
+
+        let blank = normalize_presence_session_id("   ").unwrap_err();
+        assert_eq!(blank.status, StatusCode::BAD_REQUEST);
+        assert_eq!(blank.code, "invalid_session_id");
+
+        let too_long = normalize_presence_session_id(&"a".repeat(129)).unwrap_err();
+        assert_eq!(too_long.status, StatusCode::BAD_REQUEST);
+        assert_eq!(too_long.code, "invalid_session_id");
+    }
+
+    #[tokio::test]
+    async fn records_dashboard_presence_and_prunes_stale_sessions() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE dashboard_presence ( \
+             session_id TEXT PRIMARY KEY, \
+             last_seen_at INTEGER NOT NULL \
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            record_dashboard_presence(&pool, "session-a").await.unwrap(),
+            1
+        );
+        assert_eq!(
+            record_dashboard_presence(&pool, "session-b").await.unwrap(),
+            2
+        );
+
+        let stale_seen_at = unix_now_i64() - DASHBOARD_PRESENCE_WINDOW_SECONDS - 1;
+        sqlx::query("UPDATE dashboard_presence SET last_seen_at = ?1 WHERE session_id = ?2")
+            .bind(stale_seen_at)
+            .bind("session-a")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            record_dashboard_presence(&pool, "session-b").await.unwrap(),
+            1
+        );
+    }
 }

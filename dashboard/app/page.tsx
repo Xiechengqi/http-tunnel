@@ -22,12 +22,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { publicApi } from "@/lib/api";
-import type { DashboardSummary, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
+import type { DashboardPresence, DashboardSummary, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
 import { cn, formatBytes, formatNumber } from "@/lib/utils";
 
 type StatusFilter = "all" | "online" | "offline";
 
 const COUNTRY_NAMES = new Map(regions.map((region) => [region.code.toUpperCase(), region.name]));
+const DEFAULT_MAP_OFFSET_RATIO = 0.58;
+const MAP_OFFSET_STORAGE_KEY = "http-tunnel.dashboard.mapOffsetRatio.v1";
 
 export default function PublicDashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -188,9 +190,61 @@ export default function PublicDashboardPage() {
           </>
         ) : null}
       </main>
+      <PresenceFooter />
       {docsOpen ? <ClientDocsModal serverUrl={summary?.server_url} onClose={() => setDocsOpen(false)} /> : null}
     </div>
   );
+}
+
+function PresenceFooter() {
+  const [presence, setPresence] = useState<DashboardPresence | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sessionId = dashboardPresenceSessionId();
+
+    async function tick() {
+      try {
+        const data = await publicApi<DashboardPresence>("/api/v1/dashboard/presence", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId }),
+        });
+        if (!cancelled) setPresence(data);
+      } catch {
+        // Presence is informational; dashboard data should remain usable if it fails.
+      }
+    }
+
+    tick();
+    const timer = window.setInterval(tick, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  return (
+    <footer className="mx-auto flex w-[calc(100%-2rem)] max-w-7xl flex-wrap items-center justify-center gap-2 py-6 font-mono text-[11px] uppercase tracking-[0.1em] text-muted-foreground">
+      <span>
+        Page Online <strong className="ml-1 text-foreground">{presence?.online_count ?? 0}</strong>
+      </span>
+      <span className="opacity-50">|</span>
+      <a
+        href="https://github.com/Xiechengqi/http-tunnel"
+        target="_blank"
+        rel="noreferrer"
+        className="hover:text-primary"
+      >
+        GitHub
+      </a>
+    </footer>
+  );
+}
+
+function dashboardPresenceSessionId() {
+  const randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto);
+  return randomUUID ? randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function ClientDocsModal({ serverUrl, onClose }: { serverUrl?: string | null; onClose: () => void }) {
@@ -265,9 +319,9 @@ function TunnelSourceMap({
   const mapRootRef = useRef<HTMLDivElement | null>(null);
   const [mapFrameRef, mapFrameSize] = useElementSize<HTMLDivElement>();
   const dragRef = useRef<MapDragState | null>(null);
-  const offsetInitializedRef = useRef(false);
+  const mapOffsetRatioRef = useRef(DEFAULT_MAP_OFFSET_RATIO);
   const [tooltip, setTooltip] = useState<MapTooltipState | null>(null);
-  const [mapOffsetY, setMapOffsetY] = useState(0);
+  const [mapOffsetRatio, setMapOffsetRatioValue] = useState(DEFAULT_MAP_OFFSET_RATIO);
   const countryMeta = useMemo(
     () => new Map(countries.map((country) => [country.country_code.toUpperCase(), country])),
     [countries],
@@ -285,18 +339,20 @@ function TunnelSourceMap({
   const mapSize = Math.max(640, Math.ceil(mapFrameWidth || 960));
   const mapVisualHeight = mapSize * 0.75;
   const maxMapOffsetY = Math.max(0, (mapVisualHeight - mapFrameSize.height) / 2);
-  const defaultMapOffsetY = maxMapOffsetY * 0.58;
+  const mapOffsetY = maxMapOffsetY > 0 ? mapOffsetRatio * maxMapOffsetY : 0;
 
   useEffect(() => {
-    if (mapFrameSize.height <= 0) return;
-    setMapOffsetY((current) => {
-      if (!offsetInitializedRef.current) {
-        offsetInitializedRef.current = true;
-        return defaultMapOffsetY;
-      }
-      return clamp(current, -maxMapOffsetY, maxMapOffsetY);
-    });
-  }, [defaultMapOffsetY, mapFrameSize.height, maxMapOffsetY]);
+    const storedRatio = readStoredMapOffsetRatio();
+    if (storedRatio === null) return;
+    mapOffsetRatioRef.current = storedRatio;
+    setMapOffsetRatioValue(storedRatio);
+  }, []);
+
+  function setMapOffsetRatio(nextRatio: number) {
+    const clampedRatio = clamp(nextRatio, -1, 1);
+    mapOffsetRatioRef.current = clampedRatio;
+    setMapOffsetRatioValue(clampedRatio);
+  }
 
   function showTooltip(event: PointerEvent<HTMLDivElement>) {
     const root = mapRootRef.current;
@@ -347,7 +403,7 @@ function TunnelSourceMap({
     const drag = dragRef.current;
     if (drag?.pointerId === event.pointerId) {
       const nextOffset = clamp(drag.startOffsetY + event.clientY - drag.startY, -maxMapOffsetY, maxMapOffsetY);
-      setMapOffsetY(nextOffset);
+      setMapOffsetRatio(maxMapOffsetY > 0 ? nextOffset / maxMapOffsetY : 0);
       setTooltip(null);
       event.preventDefault();
       return;
@@ -358,6 +414,7 @@ function TunnelSourceMap({
   function stopMapDrag(event: PointerEvent<HTMLDivElement>) {
     if (dragRef.current?.pointerId !== event.pointerId) return;
     dragRef.current = null;
+    writeStoredMapOffsetRatio(mapOffsetRatioRef.current);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -489,6 +546,27 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function readStoredMapOffsetRatio() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(MAP_OFFSET_STORAGE_KEY);
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? clamp(value, -1, 1) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredMapOffsetRatio(value: number) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MAP_OFFSET_STORAGE_KEY, String(clamp(value, -1, 1)));
+  } catch {
+    // Private browsing or locked-down storage should not break the dashboard.
+  }
+}
+
 function countryStyle(context: CountryContext<number>, maxClients: number) {
   const value = Number(context.countryValue || 0);
   if (!value || !maxClients) {
@@ -610,7 +688,7 @@ function formatDate(value?: string | null) {
   if (!value) return "never";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "2-digit",
     hour: "2-digit",

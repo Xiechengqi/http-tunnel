@@ -1,7 +1,7 @@
 "use client";
 
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Download,
   Eye,
@@ -31,6 +31,7 @@ import { Select } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { ToastViewport, type ToastItem, type ToastTone } from "@/components/ui/toast";
 import { adminApi, adminPage, adminText, downloadBlob, qs } from "@/lib/api";
 import type {
   AdminSession,
@@ -67,6 +68,9 @@ type Snapshot = {
 const pageSize = 50;
 const tabValues = ["overview", "tunnels", "activity", "security", "config", "maintenance", "version"] as const;
 type AdminTab = (typeof tabValues)[number];
+type ConfirmToast = (message: string, action: () => void, options?: { title?: string; tone?: ToastTone; confirmLabel?: string }) => void;
+type NotifyToast = (title: string, description?: string, tone?: ToastTone) => void;
+type ToastRequest = Omit<ToastItem, "id"> & { durationMs?: number };
 
 const configPages = [
   { value: "core", label: "Core", categories: ["Core"] },
@@ -100,6 +104,7 @@ export function AdminConsole() {
   const [configDraft, setConfigDraft] = useState<ServerConfig>({});
   const [configText, setConfigText] = useState("");
   const [detail, setDetail] = useState<unknown>(null);
+  const { toasts, pushToast, dismissToast, activateToast } = useToastQueue();
 
   useEffect(() => {
     const syncTab = () => {
@@ -185,6 +190,25 @@ export function AdminConsole() {
     if (!status || status.request_count === 0) return 0;
     return Math.min(100, Math.round((status.error_count / status.request_count) * 100));
   }, [snapshot]);
+  const confirmToast: ConfirmToast = useCallback(
+    (description, action, options) => {
+      pushToast({
+        title: options?.title || "Confirm action",
+        description,
+        tone: options?.tone || "warning",
+        actionLabel: options?.confirmLabel || "Confirm",
+        cancelLabel: "Cancel",
+        onAction: action,
+      });
+    },
+    [pushToast],
+  );
+  const notifyToast: NotifyToast = useCallback(
+    (title, description, tone = "default") => {
+      pushToast({ title, description, tone, durationMs: 8000 });
+    },
+    [pushToast],
+  );
 
   return (
     <AdminShell onLogout={logout} activeTab={tab} onTabChange={selectTab}>
@@ -208,6 +232,7 @@ export function AdminConsole() {
                 }}
                 busy={busy}
                 action={(label, action) => mutate(label, action)}
+                confirm={confirmToast}
                 setDetail={setDetail}
               />
               <DetailPanel detail={detail} />
@@ -224,7 +249,7 @@ export function AdminConsole() {
               <DetailPanel detail={detail} />
             </TabsContent>
             <TabsContent value="security">
-              <Security sessions={snapshot.sessions} action={(label, action) => mutate(label, action)} busy={busy} />
+              <Security sessions={snapshot.sessions} action={(label, action) => mutate(label, action)} confirm={confirmToast} busy={busy} />
             </TabsContent>
             <TabsContent value="config">
               <ConfigEditor
@@ -238,16 +263,62 @@ export function AdminConsole() {
               />
             </TabsContent>
             <TabsContent value="maintenance">
-              <Maintenance data={snapshot.maintenance} action={(label, action) => mutate(label, action)} busy={busy} />
+              <Maintenance data={snapshot.maintenance} action={(label, action) => mutate(label, action)} confirm={confirmToast} busy={busy} />
             </TabsContent>
             <TabsContent value="version">
-              <VersionPanel version={snapshot.version} upgrade={snapshot.upgrade} action={(label, action) => mutate(label, action, false)} busy={busy} />
+              <VersionPanel version={snapshot.version} upgrade={snapshot.upgrade} action={(label, action) => mutate(label, action, false)} confirm={confirmToast} notify={notifyToast} busy={busy} />
             </TabsContent>
           </Tabs>
         ) : null}
       </div>
+      <ToastViewport toasts={toasts} onDismiss={dismissToast} onAction={activateToast} />
     </AdminShell>
   );
+}
+
+function useToastQueue() {
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const nextToastId = useRef(0);
+  const timers = useRef<Map<string, number>>(new Map());
+
+  const dismissToast = useCallback((id: string) => {
+    const timer = timers.current.get(id);
+    if (timer) window.clearTimeout(timer);
+    timers.current.delete(id);
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+
+  const pushToast = useCallback(
+    (toast: ToastRequest) => {
+      const id = `toast-${Date.now()}-${nextToastId.current++}`;
+      const next: ToastItem = { ...toast, id };
+      setToasts((current) => [next, ...current].slice(0, 5));
+      if (!toast.onAction && toast.durationMs !== 0) {
+        const timer = window.setTimeout(() => dismissToast(id), toast.durationMs ?? 5000);
+        timers.current.set(id, timer);
+      }
+    },
+    [dismissToast],
+  );
+
+  const activateToast = useCallback(
+    (toast: ToastItem) => {
+      dismissToast(toast.id);
+      toast.onAction?.();
+    },
+    [dismissToast],
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const timer of timers.current.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.current.clear();
+    };
+  }, []);
+
+  return { toasts, pushToast, dismissToast, activateToast };
 }
 
 function Overview({ snapshot, errorRate, reload, busy }: { snapshot: Snapshot; errorRate: number; reload: () => void; busy: string }) {
@@ -323,6 +394,7 @@ function Tunnels({
   filter,
   page,
   action,
+  confirm,
   busy,
   setDetail,
 }: {
@@ -332,6 +404,7 @@ function Tunnels({
   filter: () => void;
   page: (direction: number) => void;
   action: (label: string, action: () => Promise<void>) => void;
+  confirm: ConfirmToast;
   busy: string;
   setDetail: (detail: unknown) => void;
 }) {
@@ -364,12 +437,12 @@ function Tunnels({
                     <div className="flex justify-end gap-1">
                       <IconAction label="Detail" icon={<Eye />} onClick={() => action("Load detail", async () => setDetail(await adminApi(`/api/admin/tunnels/${tunnel.id}/detail`)))} />
                       <IconAction label="Inspector" icon={<Shield />} onClick={() => action("Toggle inspector", () => adminApi(`/api/admin/tunnels/${tunnel.id}`, { method: "PATCH", body: JSON.stringify({ inspector_enabled: !tunnel.inspector_enabled }) }))} />
-                      <IconAction label="Expire" icon={<PauseCircle />} danger onClick={() => confirmAction("Expire this tunnel now?", () => action("Expire tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}`, { method: "PATCH", body: JSON.stringify({ expire_now: true }) })))} />
-                      <IconAction label="Disconnect" icon={<Unplug />} onClick={() => confirmAction("Disconnect this tunnel?", () => action("Disconnect tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}/disconnect`, { method: "POST" })))} />
-                      <IconAction label="Disable" icon={<PauseCircle />} onClick={() => confirmAction("Disable this tunnel?", () => action("Disable tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}/disable`, { method: "POST" })))} />
+                      <IconAction label="Expire" icon={<PauseCircle />} danger onClick={() => confirm("Expire this tunnel now?", () => action("Expire tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}`, { method: "PATCH", body: JSON.stringify({ expire_now: true }) })), { tone: "danger" })} />
+                      <IconAction label="Disconnect" icon={<Unplug />} onClick={() => confirm("Disconnect this tunnel?", () => action("Disconnect tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}/disconnect`, { method: "POST" })))} />
+                      <IconAction label="Disable" icon={<PauseCircle />} onClick={() => confirm("Disable this tunnel?", () => action("Disable tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}/disable`, { method: "POST" })))} />
                       <IconAction label="Enable" icon={<PlayCircle />} onClick={() => action("Enable tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}/enable`, { method: "POST" }))} />
-                      <IconAction label="Rotate token" icon={<RotateCcw />} onClick={() => confirmAction("Rotate token and disconnect active client?", () => action("Rotate tunnel token", async () => setDetail(await adminApi(`/api/admin/tunnels/${tunnel.id}/token/rotate`, { method: "POST" }))))} />
-                      <IconAction label="Delete" icon={<Trash2 />} danger onClick={() => confirmAction("Delete this tunnel?", () => action("Delete tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}`, { method: "DELETE" })))} />
+                      <IconAction label="Rotate token" icon={<RotateCcw />} onClick={() => confirm("Rotate token and disconnect active client?", () => action("Rotate tunnel token", async () => setDetail(await adminApi(`/api/admin/tunnels/${tunnel.id}/token/rotate`, { method: "POST" }))))} />
+                      <IconAction label="Delete" icon={<Trash2 />} danger onClick={() => confirm("Delete this tunnel?", () => action("Delete tunnel", () => adminApi(`/api/admin/tunnels/${tunnel.id}`, { method: "DELETE" })), { tone: "danger" })} />
                     </div>
                   </TableCell>
                 </TableRow>
@@ -507,14 +580,24 @@ function ActivityTables({
   );
 }
 
-function Security({ sessions, action, busy }: { sessions: AdminSession[]; action: (label: string, action: () => Promise<void>) => void; busy: string }) {
+function Security({
+  sessions,
+  action,
+  confirm,
+  busy,
+}: {
+  sessions: AdminSession[];
+  action: (label: string, action: () => Promise<void>) => void;
+  confirm: ConfirmToast;
+  busy: string;
+}) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   return (
     <div className="grid gap-4">
       <Card>
-        <CardHeader><CardTitle>Admin sessions</CardTitle><Button variant="destructive" size="sm" onClick={() => confirmAction("Revoke all other active sessions?", () => action("Revoke other sessions", () => adminApi("/api/admin/sessions/revoke-all", { method: "POST" })))}>Revoke other sessions</Button></CardHeader>
+        <CardHeader><CardTitle>Admin sessions</CardTitle><Button variant="destructive" size="sm" onClick={() => confirm("Revoke all other active sessions?", () => action("Revoke other sessions", () => adminApi("/api/admin/sessions/revoke-all", { method: "POST" })), { tone: "danger" })}>Revoke other sessions</Button></CardHeader>
         <CardContent>
           <Table>
             <TableHeader><TableRow><TableHead>ID</TableHead><TableHead>IP</TableHead><TableHead>User agent</TableHead><TableHead>Last seen</TableHead><TableHead>Status</TableHead><TableHead /></TableRow></TableHeader>
@@ -526,7 +609,7 @@ function Security({ sessions, action, busy }: { sessions: AdminSession[]; action
                   <TableCell className="max-w-sm truncate text-muted-foreground">{session.user_agent || ""}</TableCell>
                   <TableCell>{session.last_seen_at}</TableCell>
                   <TableCell><Badge variant={session.active ? "healthy" : "muted"}>{session.current ? "current" : session.active ? "active" : "inactive"}</Badge></TableCell>
-                  <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => confirmAction("Revoke this admin session?", () => action("Revoke session", () => adminApi(`/api/admin/sessions/${session.id}/revoke`, { method: "POST" })))}>Revoke</Button></TableCell>
+                  <TableCell className="text-right"><Button variant="outline" size="sm" onClick={() => confirm("Revoke this admin session?", () => action("Revoke session", () => adminApi(`/api/admin/sessions/${session.id}/revoke`, { method: "POST" })))}>Revoke</Button></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -694,7 +777,17 @@ function ConfigFieldGrid({
   );
 }
 
-function Maintenance({ data, action, busy }: { data: MaintenanceStatus; action: (label: string, action: () => Promise<void>) => void; busy: string }) {
+function Maintenance({
+  data,
+  action,
+  confirm,
+  busy,
+}: {
+  data: MaintenanceStatus;
+  action: (label: string, action: () => Promise<void>) => void;
+  confirm: ConfirmToast;
+  busy: string;
+}) {
   return (
     <div className="grid gap-4">
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -706,7 +799,7 @@ function Maintenance({ data, action, busy }: { data: MaintenanceStatus; action: 
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-2"><DatabasePlugConnectedRegular className="h-5 w-5" />Maintenance actions</CardTitle></CardHeader>
         <CardContent className="flex flex-wrap gap-2">
-          <Button variant="outline" disabled={!!busy} onClick={() => confirmAction("Run cleanup now?", () => action("Run cleanup", () => adminApi("/api/admin/cleanup", { method: "POST" })))}>Run cleanup</Button>
+          <Button variant="outline" disabled={!!busy} onClick={() => confirm("Run cleanup now?", () => action("Run cleanup", () => adminApi("/api/admin/cleanup", { method: "POST" })))}>Run cleanup</Button>
           <Button variant="outline" disabled={!!busy} onClick={() => action("WAL checkpoint", () => adminApi("/api/admin/maintenance/wal-checkpoint", { method: "POST" }))}>WAL checkpoint</Button>
           <Button variant="outline" disabled={!!busy} onClick={() => action("Analyze", () => adminApi("/api/admin/maintenance/analyze", { method: "POST" }))}>Analyze</Button>
           <Button variant="outline" disabled={!!busy} onClick={() => action("Vacuum", () => adminApi("/api/admin/maintenance/vacuum", { method: "POST" }))}>Vacuum</Button>
@@ -718,7 +811,21 @@ function Maintenance({ data, action, busy }: { data: MaintenanceStatus; action: 
   );
 }
 
-function VersionPanel({ version, upgrade, action, busy }: { version: unknown; upgrade: UpgradeStatus; action: (label: string, action: () => Promise<void>) => void; busy: string }) {
+function VersionPanel({
+  version,
+  upgrade,
+  action,
+  confirm,
+  notify,
+  busy,
+}: {
+  version: unknown;
+  upgrade: UpgradeStatus;
+  action: (label: string, action: () => Promise<void>) => void;
+  confirm: ConfirmToast;
+  notify: NotifyToast;
+  busy: string;
+}) {
   return (
     <Card>
       <CardHeader><CardTitle className="flex items-center gap-2"><FileClock className="h-4 w-4" />Version and upgrade</CardTitle></CardHeader>
@@ -739,8 +846,37 @@ function VersionPanel({ version, upgrade, action, busy }: { version: unknown; up
         />
         {upgrade.last_message ? <p className="text-sm text-muted-foreground">{upgrade.last_message}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" disabled={!!busy || upgrade.upgrade_in_progress} onClick={() => confirmAction("Upgrade the server binary now?", () => action("Upgrade", async () => alert(JSON.stringify(await adminApi("/api/admin/upgrade", { method: "POST" }), null, 2))))}>Upgrade now</Button>
-          <Button variant="destructive" disabled={!!busy} onClick={() => confirmAction("Restart the server?", () => action("Restart", async () => alert(JSON.stringify(await adminApi("/api/admin/restart", { method: "POST" }), null, 2))))}>Restart</Button>
+          <Button
+            variant="outline"
+            disabled={!!busy || upgrade.upgrade_in_progress}
+            onClick={() =>
+              confirm("Upgrade the server binary now?", () =>
+                action("Upgrade", async () => {
+                  const result = await adminApi<unknown>("/api/admin/upgrade", { method: "POST" });
+                  notify("Upgrade response", JSON.stringify(result, null, 2), "success");
+                }),
+              )
+            }
+          >
+            Upgrade now
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={!!busy}
+            onClick={() =>
+              confirm(
+                "Restart the server?",
+                () =>
+                  action("Restart", async () => {
+                    const result = await adminApi<unknown>("/api/admin/restart", { method: "POST" });
+                    notify("Restart response", JSON.stringify(result, null, 2), "success");
+                  }),
+                { tone: "danger" },
+              )
+            }
+          >
+            Restart
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -813,10 +949,6 @@ function IconAction({ label, icon, onClick, danger }: { label: string; icon: Rea
       {icon}
     </Button>
   );
-}
-
-function confirmAction(message: string, action: () => void) {
-  if (window.confirm(message)) action();
 }
 
 function fieldValue(value: unknown) {

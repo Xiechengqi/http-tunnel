@@ -61,6 +61,10 @@ export type PublicTunnelCountrySource = {
   tunnel_count: number;
 };
 
+export type DashboardPresence = {
+  online_count: number;
+};
+
 export type AdminStatus = {
   setup_required: boolean;
   pending_restart: boolean;

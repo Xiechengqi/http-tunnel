@@ -55,6 +55,7 @@ async fn initialize_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_column(pool, "tunnels", "owner_client_secret_hash", "TEXT").await?;
     ensure_column(pool, "tunnels", "claim_expires_at", "TIMESTAMP").await?;
     ensure_tunnel_claim_schema(pool).await?;
+    ensure_dashboard_presence_schema(pool).await?;
     Ok(())
 }
 
@@ -214,6 +215,24 @@ async fn ensure_claim_index(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_claimed \
          ON tunnels(subdomain) WHERE status != 'deleted'",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_dashboard_presence_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dashboard_presence ( \
+         session_id TEXT PRIMARY KEY, \
+         last_seen_at INTEGER NOT NULL \
+         )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dashboard_presence_last_seen \
+         ON dashboard_presence(last_seen_at DESC)",
     )
     .execute(pool)
     .await?;

@@ -125,8 +125,14 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     revoked_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS dashboard_presence (
+    session_id TEXT PRIMARY KEY,
+    last_seen_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_request_logs_tunnel_started ON request_logs(tunnel_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_error_started ON request_logs(error, started_at);
 CREATE INDEX IF NOT EXISTS idx_request_logs_status_started ON request_logs(status, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_tunnel_connected ON sessions(tunnel_id, connected_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tunnels_subdomain_claimed ON tunnels(subdomain) WHERE status != 'deleted';
+CREATE INDEX IF NOT EXISTS idx_dashboard_presence_last_seen ON dashboard_presence(last_seen_at DESC);
