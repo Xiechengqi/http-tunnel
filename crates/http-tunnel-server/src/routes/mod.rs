@@ -11,7 +11,7 @@ mod proxy;
 mod setup;
 mod tunnels;
 
-pub(crate) use admin::spawn_auto_upgrade_job;
+pub(crate) use admin::{spawn_auto_upgrade_job, startup_binary_sha256};
 
 pub fn router() -> Router<AppState> {
     Router::new()

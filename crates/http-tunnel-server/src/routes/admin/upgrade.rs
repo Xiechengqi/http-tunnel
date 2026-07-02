@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context as _;
 use axum::{
     extract::{
         connect_info::ConnectInfo,
@@ -14,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::{
-    cmp::Ordering as VersionOrdering,
     fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -81,24 +81,12 @@ pub struct UpgradeResponse {
     pub checksum_sha256: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    assets: Vec<GitHubAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
-}
-
 #[derive(Debug, Clone)]
 struct ReleaseAsset {
     tag_name: String,
     asset_name: String,
     download_url: String,
-    checksum_url: Option<String>,
+    checksum_url: String,
 }
 
 struct UpgradeCandidate {
@@ -197,34 +185,7 @@ pub async fn upgrade(
         ));
     };
     emit_upgrade_event(&state, "resolving", "resolving release asset");
-    let candidate = prepare_upgrade_candidate(&cfg).await?;
-    if !candidate.update_available {
-        record_admin_audit(
-            &state,
-            &headers,
-            remote_addr,
-            AuditLog {
-                actor_token: Some(&actor),
-                action: "upgrade",
-                target_type: Some("release"),
-                target_id: Some(&candidate.asset.asset_name),
-                result: "skipped",
-                detail: Some("current server binary already matches the selected release"),
-            },
-        )
-        .await?;
-        return Ok(Json(ApiResponse::ok(UpgradeResponse {
-            started: false,
-            message: "current server binary already matches the selected release".to_string(),
-            current_version: current_version(),
-            resolved_tag: Some(candidate.asset.tag_name),
-            update_available: false,
-            asset_name: Some(candidate.asset.asset_name),
-            backup_path: None,
-            restart_method: None,
-            checksum_sha256: Some(candidate.expected_checksum),
-        })));
-    }
+    let candidate = prepare_upgrade_candidate(&cfg, None).await?;
     let response = install_upgrade_candidate(
         &state,
         &cfg,
@@ -297,13 +258,30 @@ async fn auto_upgrade_once(state: &AppState) -> Result<()> {
         .await?;
         return Ok(());
     }
+    if get_pending_restart(state).await? {
+        record_auto_upgrade_status(
+            state,
+            "skipped",
+            "restart is already pending after a previous upgrade",
+            None,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
 
-    let candidate = prepare_upgrade_candidate(&cfg).await?;
+    let startup_binary_sha256 = state.startup_binary_sha256.as_deref().ok_or_else(|| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "startup_checksum_missing",
+            "startup binary SHA256 is not available",
+        )
+    })?;
+    let candidate = prepare_upgrade_candidate(&cfg, Some(startup_binary_sha256)).await?;
     if !candidate.update_available {
         let message = format!(
-            "no newer release found; current={} latest={}",
-            current_version(),
-            candidate.asset.tag_name
+            "release binary unchanged; startup_sha256={} release_sha256={}",
+            startup_binary_sha256, candidate.expected_checksum
         );
         record_auto_upgrade_status(
             state,
@@ -317,7 +295,7 @@ async fn auto_upgrade_once(state: &AppState) -> Result<()> {
     }
 
     let waiting_message = format!(
-        "new release {} is available; waiting for {}s without tunnel proxy traffic",
+        "release {} binary changed; waiting for {}s without tunnel proxy traffic",
         candidate.asset.tag_name,
         AUTO_UPGRADE_IDLE_WINDOW.as_secs()
     );
@@ -357,12 +335,23 @@ async fn auto_upgrade_once(state: &AppState) -> Result<()> {
         .await?;
         return Ok(());
     }
-    let candidate = prepare_upgrade_candidate(&cfg).await?;
+    if get_pending_restart(state).await? {
+        record_auto_upgrade_status(
+            state,
+            "skipped",
+            "restart became pending while waiting for idle traffic",
+            Some(candidate.asset.tag_name.as_str()),
+            Some(true),
+        )
+        .await?;
+        return Ok(());
+    }
+    let candidate = prepare_upgrade_candidate(&cfg, Some(startup_binary_sha256)).await?;
     if !candidate.update_available {
         record_auto_upgrade_status(
             state,
             "no_update",
-            "selected release already matches current server binary after idle wait",
+            "release binary matched startup binary after idle wait",
             Some(candidate.asset.tag_name.as_str()),
             Some(false),
         )
@@ -455,18 +444,19 @@ fn upgrade_event_json(level: &str, message: &str) -> String {
     .to_string()
 }
 
-async fn prepare_upgrade_candidate(cfg: &ServerConfig) -> Result<UpgradeCandidate> {
+async fn prepare_upgrade_candidate(
+    cfg: &ServerConfig,
+    startup_binary_sha256: Option<&str>,
+) -> Result<UpgradeCandidate> {
     let asset = resolve_release_asset(cfg).await?;
     let expected_checksum = fetch_expected_checksum(&asset).await?;
     let current_exe = std::env::current_exe().map_err(AppError::internal)?;
     let backup_path = backup_path(&current_exe);
-    let current_checksum = sha256_file(&current_exe)?;
-    let update_available = update_available(
-        current_version().as_str(),
-        &asset.tag_name,
-        &current_checksum,
-        &expected_checksum,
-    );
+    let update_available = if let Some(startup_binary_sha256) = startup_binary_sha256 {
+        update_available(startup_binary_sha256, &expected_checksum)
+    } else {
+        true
+    };
     Ok(UpgradeCandidate {
         asset,
         expected_checksum,
@@ -506,6 +496,7 @@ async fn install_upgrade_candidate(
         cfg.systemd_unit.as_deref(),
         Some(candidate.current_exe.as_path()),
     )?;
+    set_pending_restart(state, !restart.attempted).await?;
     add_audit_event(state, restart_event, restart.method).await?;
     emit_upgrade_event(state, "complete", &restart.message);
     Ok(UpgradeResponse {
@@ -524,54 +515,15 @@ async fn install_upgrade_candidate(
     })
 }
 
-fn update_available(
-    current_version: &str,
-    release_tag: &str,
-    current_checksum: &str,
-    release_checksum: &str,
-) -> bool {
-    match compare_versions(release_tag, current_version) {
-        Some(VersionOrdering::Greater) => true,
-        Some(VersionOrdering::Equal) | Some(VersionOrdering::Less) => false,
-        None => !current_checksum.eq_ignore_ascii_case(release_checksum),
-    }
+fn update_available(startup_binary_sha256: &str, release_checksum: &str) -> bool {
+    !startup_binary_sha256.eq_ignore_ascii_case(release_checksum)
 }
 
-fn compare_versions(left: &str, right: &str) -> Option<VersionOrdering> {
-    let left = parse_version_numbers(left)?;
-    let right = parse_version_numbers(right)?;
-    let max_len = left.len().max(right.len());
-    for index in 0..max_len {
-        let left_value = left.get(index).copied().unwrap_or_default();
-        let right_value = right.get(index).copied().unwrap_or_default();
-        match left_value.cmp(&right_value) {
-            VersionOrdering::Equal => {}
-            ordering => return Some(ordering),
-        }
-    }
-    Some(VersionOrdering::Equal)
-}
-
-fn parse_version_numbers(value: &str) -> Option<Vec<u64>> {
-    let core = value
-        .trim()
-        .trim_start_matches('v')
-        .trim_start_matches('V')
-        .split(['-', '+'])
-        .next()
-        .unwrap_or_default();
-    if core.is_empty() {
-        return None;
-    }
-    core.split('.')
-        .map(|part| {
-            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
-                None
-            } else {
-                part.parse::<u64>().ok()
-            }
-        })
-        .collect()
+pub(crate) fn startup_binary_sha256() -> anyhow::Result<String> {
+    let current_exe = std::env::current_exe().context("locate current executable")?;
+    let bytes = fs::read(&current_exe)
+        .with_context(|| format!("read current executable {}", current_exe.display()))?;
+    Ok(sha256_hex(&bytes))
 }
 
 fn current_version() -> String {
@@ -646,89 +598,36 @@ async fn set_upgrade_setting_current_timestamp(state: &AppState, key: &str) -> R
 }
 
 async fn resolve_release_asset(cfg: &ServerConfig) -> Result<ReleaseAsset> {
-    let release_repo = effective_release_repo(cfg);
-    let release_url = if cfg.release_tag == "latest" {
-        format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            release_repo
-        )
-    } else {
-        format!(
-            "https://api.github.com/repos/{}/releases/tags/{}",
-            release_repo, cfg.release_tag
-        )
-    };
-    let client = reqwest::Client::builder()
-        .user_agent(format!("http-tunnel/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(AppError::internal)?;
-    let release = client
-        .get(release_url)
-        .send()
-        .await
-        .map_err(AppError::internal)?
-        .error_for_status()
-        .map_err(AppError::internal)?
-        .json::<GitHubRelease>()
-        .await
-        .map_err(AppError::internal)?;
     let asset_name = server_asset_name();
-    let checksum_url = select_checksum_asset(&release.assets, &asset_name)
-        .map(|asset| cfg.proxied_github_url(&asset.browser_download_url));
-    let Some(asset) = select_release_asset(release.assets, &asset_name) else {
-        return Err(AppError::new(
-            StatusCode::NOT_FOUND,
-            "upgrade_asset_not_found",
-            "matching server release asset was not found",
-        ));
-    };
+    let release_tag = cfg.release_tag.trim();
     Ok(ReleaseAsset {
-        tag_name: release.tag_name,
+        tag_name: release_tag.to_string(),
+        download_url: release_download_url(cfg, release_tag, &asset_name),
+        checksum_url: release_checksum_url(cfg, release_tag, &asset_name),
         asset_name,
-        download_url: cfg.proxied_github_url(&asset.browser_download_url),
-        checksum_url,
     })
 }
 
-fn select_release_asset(assets: Vec<GitHubAsset>, asset_name: &str) -> Option<GitHubAsset> {
-    assets.into_iter().find(|asset| asset.name == asset_name)
+fn release_download_url(cfg: &ServerConfig, release_tag: &str, asset_name: &str) -> String {
+    cfg.proxied_github_url(&format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        effective_release_repo(cfg),
+        release_tag,
+        asset_name
+    ))
 }
 
-fn select_checksum_asset<'a>(
-    assets: &'a [GitHubAsset],
-    asset_name: &str,
-) -> Option<&'a GitHubAsset> {
-    let sidecars = [
-        format!("{asset_name}.sha256"),
-        format!("{asset_name}.sha256sum"),
-    ];
-    assets
-        .iter()
-        .find(|asset| sidecars.contains(&asset.name))
-        .or_else(|| {
-            assets.iter().find(|asset| {
-                matches!(
-                    asset.name.as_str(),
-                    "SHA256SUMS" | "SHA256SUMS.txt" | "checksums.txt"
-                )
-            })
-        })
+fn release_checksum_url(cfg: &ServerConfig, release_tag: &str, asset_name: &str) -> String {
+    release_download_url(cfg, release_tag, &format!("{asset_name}.sha256"))
 }
 
 async fn fetch_expected_checksum(asset: &ReleaseAsset) -> Result<String> {
-    let Some(checksum_url) = asset.checksum_url.as_deref() else {
-        return Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "upgrade_checksum_missing",
-            "matching SHA256 checksum asset was not found",
-        ));
-    };
     let client = reqwest::Client::builder()
         .user_agent(format!("http-tunnel/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(AppError::internal)?;
     let text = client
-        .get(checksum_url)
+        .get(&asset.checksum_url)
         .send()
         .await
         .map_err(AppError::internal)?
@@ -786,19 +685,22 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn parse_sha256_checksum(text: &str, asset_name: &str) -> Option<String> {
+    let mut first_valid = None;
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let fields = line.split_whitespace().collect::<Vec<_>>();
         if fields.len() == 1 && valid_sha256_hex(fields[0]) {
-            return Some(fields[0].to_ascii_lowercase());
+            first_valid.get_or_insert_with(|| fields[0].to_ascii_lowercase());
+            continue;
         }
         if fields.len() >= 2 && valid_sha256_hex(fields[0]) {
+            first_valid.get_or_insert_with(|| fields[0].to_ascii_lowercase());
             let filename = fields[1].trim_start_matches('*');
             if filename.ends_with(asset_name) {
                 return Some(fields[0].to_ascii_lowercase());
             }
         }
     }
-    None
+    first_valid
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1139,36 +1041,25 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn selects_release_asset_by_exact_name() {
-        let assets = vec![
-            GitHubAsset {
-                name: "http-tunnel-client-linux-amd64".to_string(),
-                browser_download_url: "client".to_string(),
-            },
-            GitHubAsset {
-                name: "http-tunnel-server-linux-amd64".to_string(),
-                browser_download_url: "server".to_string(),
-            },
-        ];
-        let asset = select_release_asset(assets, "http-tunnel-server-linux-amd64").unwrap();
-        assert_eq!(asset.browser_download_url, "server");
+    fn builds_latest_download_urls_with_github_proxy() {
+        let cfg = ServerConfig {
+            release_repo: "owner/repo".to_string(),
+            release_tag: "latest".to_string(),
+            github_proxy: "https://gh-proxy.org/".to_string(),
+            ..ServerConfig::default()
+        };
+        assert_eq!(
+            release_download_url(&cfg, "latest", "http-tunnel-server-linux-amd64"),
+            "https://gh-proxy.org/https://github.com/owner/repo/releases/download/latest/http-tunnel-server-linux-amd64"
+        );
+        assert_eq!(
+            release_checksum_url(&cfg, "latest", "http-tunnel-server-linux-amd64"),
+            "https://gh-proxy.org/https://github.com/owner/repo/releases/download/latest/http-tunnel-server-linux-amd64.sha256"
+        );
     }
 
     #[test]
-    fn selects_and_parses_sha256_checksum() {
-        let assets = vec![
-            GitHubAsset {
-                name: "SHA256SUMS".to_string(),
-                browser_download_url: "checksums".to_string(),
-            },
-            GitHubAsset {
-                name: "http-tunnel-server-linux-amd64".to_string(),
-                browser_download_url: "server".to_string(),
-            },
-        ];
-        let checksum = select_checksum_asset(&assets, "http-tunnel-server-linux-amd64").unwrap();
-        assert_eq!(checksum.browser_download_url, "checksums");
-
+    fn parses_sha256_checksum_with_filename_match_and_fallback() {
         let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert_eq!(
             parse_sha256_checksum(
@@ -1178,11 +1069,24 @@ mod tests {
             .as_deref(),
             Some(hash)
         );
+        assert_eq!(
+            parse_sha256_checksum(
+                &format!("{hash}  http-tunnel-client-linux-amd64\n"),
+                "http-tunnel-server-linux-amd64",
+            )
+            .as_deref(),
+            Some(hash)
+        );
+        assert_eq!(
+            parse_sha256_checksum(&format!("{hash}\n"), "http-tunnel-server-linux-amd64",)
+                .as_deref(),
+            Some(hash)
+        );
         assert!(parse_sha256_checksum(
             &format!("{hash}  http-tunnel-client-linux-amd64\n"),
             "http-tunnel-server-linux-amd64",
         )
-        .is_none());
+        .is_some());
     }
 
     #[test]
@@ -1255,30 +1159,12 @@ mod tests {
     }
 
     #[test]
-    fn compares_semver_like_release_tags() {
-        assert_eq!(
-            compare_versions("v0.2.0", "0.1.9"),
-            Some(VersionOrdering::Greater)
-        );
-        assert_eq!(
-            compare_versions("0.1.0", "v0.1.0"),
-            Some(VersionOrdering::Equal)
-        );
-        assert_eq!(
-            compare_versions("0.1.0", "0.1.1"),
-            Some(VersionOrdering::Less)
-        );
-        assert_eq!(compare_versions("latest", "0.1.0"), None);
-    }
-
-    #[test]
-    fn update_available_prefers_newer_versions_then_checksum_fallback() {
+    fn update_available_compares_sha256_only() {
         let old_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let new_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        assert!(update_available("0.1.0", "v0.2.0", old_hash, old_hash));
-        assert!(!update_available("0.2.0", "v0.2.0", old_hash, new_hash));
-        assert!(update_available("0.1.0", "latest", old_hash, new_hash));
-        assert!(!update_available("0.1.0", "latest", old_hash, old_hash));
+        assert!(update_available(old_hash, new_hash));
+        assert!(!update_available(old_hash, old_hash));
+        assert!(!update_available(old_hash, &old_hash.to_ascii_uppercase()));
     }
 
     fn temp_test_dir(name: &str) -> PathBuf {

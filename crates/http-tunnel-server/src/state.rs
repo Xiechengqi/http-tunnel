@@ -23,6 +23,7 @@ pub struct AppState {
     pub tunnel_traffic: Arc<RwLock<HashMap<String, TunnelTrafficCounters>>>,
     pub upgrade_events: broadcast::Sender<String>,
     pub upgrade_lock: Arc<Mutex<()>>,
+    pub startup_binary_sha256: Option<String>,
     pub last_proxy_activity_unix_ms: Arc<AtomicU64>,
     pub started_at: SystemTime,
     next_stream_id: Arc<AtomicU64>,
@@ -184,7 +185,12 @@ pub struct PendingStream {
 }
 
 impl AppState {
-    pub fn new(config_path: String, config: ServerConfig, pool: SqlitePool) -> Self {
+    pub fn new(
+        config_path: String,
+        config: ServerConfig,
+        pool: SqlitePool,
+        startup_binary_sha256: Option<String>,
+    ) -> Self {
         let (upgrade_events, _) = broadcast::channel(128);
         Self {
             config_path,
@@ -199,6 +205,7 @@ impl AppState {
             tunnel_traffic: Arc::new(RwLock::new(HashMap::new())),
             upgrade_events,
             upgrade_lock: Arc::new(Mutex::new(())),
+            startup_binary_sha256,
             last_proxy_activity_unix_ms: Arc::new(AtomicU64::new(unix_now_millis())),
             started_at: SystemTime::now(),
             next_stream_id: Arc::new(AtomicU64::new(1)),

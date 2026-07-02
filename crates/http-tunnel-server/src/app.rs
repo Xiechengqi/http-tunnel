@@ -1,4 +1,4 @@
-use crate::{db, routes, state::AppState};
+use crate::{db, routes, routes::startup_binary_sha256, state::AppState};
 use anyhow::Context;
 use axum::{
     body::Body,
@@ -21,7 +21,8 @@ pub(crate) const SUBDOMAIN_CLAIM_AFTER_DISCONNECT: &str = "+1 hour";
 pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<()> {
     let addr = config.addr;
     let pool = db::connect(&config.database_url).await?;
-    let state = AppState::new(config_path, config, pool);
+    let binary_sha256 = startup_binary_sha256().context("compute startup binary sha256")?;
+    let state = AppState::new(config_path, config, pool, Some(binary_sha256));
     state
         .initialize_tunnel_traffic_from_request_logs()
         .await
