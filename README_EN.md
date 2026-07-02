@@ -152,7 +152,7 @@ By default, server config, the SQLite database, and local data files live in `$H
 | Session pools | `session_pool_policy`, `heartbeat_interval_seconds`, `stale_session_seconds` |
 | Security | `public_tunnel_create_enabled`, `tunnel_create_bearer_token_hash`, `metrics_public`, `metrics_bearer_token_hash`, `turnstile_secret` |
 | Log maintenance | `request_log_retention_days`, `event_retention_days`, `session_retention_days`, `cleanup_interval_seconds` |
-| Upgrade/restart | `release_repo`, `release_tag`, `auto_upgrade_enabled`, `systemd_unit` |
+| Upgrade/restart | `release_repo`, `release_tag`, `github_proxy`, `auto_upgrade_enabled`, `systemd_unit` |
 
 ## Documentation
 

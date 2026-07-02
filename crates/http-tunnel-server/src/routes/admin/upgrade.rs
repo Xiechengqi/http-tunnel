@@ -54,6 +54,7 @@ pub struct UpgradeStatus {
     pub release_repo: String,
     pub effective_release_repo: String,
     pub release_tag: String,
+    pub github_proxy: Option<String>,
     pub current_version: String,
     pub check_interval_seconds: u64,
     pub idle_window_seconds: u64,
@@ -159,7 +160,8 @@ pub async fn upgrade_status(
         auto_upgrade_enabled: cfg.auto_upgrade_enabled,
         release_repo: cfg.release_repo.clone(),
         effective_release_repo: effective_release_repo(&cfg),
-        release_tag: cfg.release_tag,
+        release_tag: cfg.release_tag.clone(),
+        github_proxy: cfg.github_proxy_url(),
         current_version: current_version(),
         check_interval_seconds: AUTO_UPGRADE_CHECK_INTERVAL.as_secs(),
         idle_window_seconds: AUTO_UPGRADE_IDLE_WINDOW.as_secs(),
@@ -672,7 +674,7 @@ async fn resolve_release_asset(cfg: &ServerConfig) -> Result<ReleaseAsset> {
         .map_err(AppError::internal)?;
     let asset_name = server_asset_name();
     let checksum_url = select_checksum_asset(&release.assets, &asset_name)
-        .map(|asset| asset.browser_download_url.clone());
+        .map(|asset| cfg.proxied_github_url(&asset.browser_download_url));
     let Some(asset) = select_release_asset(release.assets, &asset_name) else {
         return Err(AppError::new(
             StatusCode::NOT_FOUND,
@@ -683,7 +685,7 @@ async fn resolve_release_asset(cfg: &ServerConfig) -> Result<ReleaseAsset> {
     Ok(ReleaseAsset {
         tag_name: release.tag_name,
         asset_name,
-        download_url: asset.browser_download_url,
+        download_url: cfg.proxied_github_url(&asset.browser_download_url),
         checksum_url,
     })
 }

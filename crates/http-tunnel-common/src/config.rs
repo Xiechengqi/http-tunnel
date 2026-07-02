@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub require_random_subdomain: bool,
     pub release_repo: String,
     pub release_tag: String,
+    pub github_proxy: String,
     pub auto_upgrade_enabled: bool,
     pub systemd_unit: Option<String>,
 }
@@ -108,6 +109,7 @@ impl Default for ServerConfig {
             require_random_subdomain: false,
             release_repo: "Xiechengqi/http-tunnel".to_string(),
             release_tag: "latest".to_string(),
+            github_proxy: String::new(),
             auto_upgrade_enabled: false,
             systemd_unit: None,
         }
@@ -153,6 +155,24 @@ impl ServerConfig {
         self.domain
             .as_ref()
             .map(|domain| format!("{}://{}.{}", self.public_scheme, subdomain, domain))
+    }
+
+    pub fn github_proxy_url(&self) -> Option<String> {
+        let proxy = self.github_proxy.trim().trim_end_matches('/');
+        (!proxy.is_empty()).then(|| proxy.to_string())
+    }
+
+    pub fn proxied_github_url(&self, url: &str) -> String {
+        let Some(proxy) = self.github_proxy_url() else {
+            return url.to_string();
+        };
+        let url = url.trim();
+        let prefixed = format!("{proxy}/");
+        if url.starts_with(&prefixed) {
+            url.to_string()
+        } else {
+            format!("{prefixed}{url}")
+        }
     }
 
     fn apply_env(&mut self) -> Result<()> {
@@ -309,6 +329,9 @@ impl ServerConfig {
         if let Ok(v) = env::var("HTTP_TUNNEL_RELEASE_TAG") {
             self.release_tag = v;
         }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY") {
+            self.github_proxy = v;
+        }
         if let Ok(v) = env::var("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED") {
             self.auto_upgrade_enabled = parse_bool("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED", &v)?;
         }
@@ -450,5 +473,29 @@ mod tests {
                 None => env::remove_var("HOME"),
             }
         }
+    }
+
+    #[test]
+    fn github_proxy_prefixes_download_urls() {
+        let mut cfg = ServerConfig {
+            github_proxy: "https://gh-proxy.org/".to_string(),
+            ..ServerConfig::default()
+        };
+        assert_eq!(
+            cfg.github_proxy_url().as_deref(),
+            Some("https://gh-proxy.org")
+        );
+        assert_eq!(
+            cfg.proxied_github_url(
+                "https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-amd64",
+            ),
+            "https://gh-proxy.org/https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-amd64"
+        );
+
+        cfg.github_proxy.clear();
+        assert_eq!(
+            cfg.proxied_github_url("https://github.com/Xiechengqi/http-tunnel/releases/latest"),
+            "https://github.com/Xiechengqi/http-tunnel/releases/latest"
+        );
     }
 }

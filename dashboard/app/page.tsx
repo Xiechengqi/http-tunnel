@@ -30,6 +30,8 @@ type StatusFilter = "all" | "online" | "offline";
 const COUNTRY_NAMES = new Map(regions.map((region) => [region.code.toUpperCase(), region.name]));
 const DEFAULT_MAP_OFFSET_RATIO = 0.58;
 const MAP_OFFSET_STORAGE_KEY = "http-tunnel.dashboard.mapOffsetRatio.v1";
+const DISCONNECTED_EXPIRE_MS = 10 * 60 * 1000;
+const EXPIRED_DELETE_MS = 60 * 60 * 1000;
 
 export default function PublicDashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -191,7 +193,7 @@ export default function PublicDashboardPage() {
         ) : null}
       </main>
       <PresenceFooter />
-      {docsOpen ? <ClientDocsModal serverUrl={summary?.server_url} onClose={() => setDocsOpen(false)} /> : null}
+      {docsOpen ? <ClientDocsModal serverUrl={summary?.server_url} githubProxy={summary?.github_proxy} onClose={() => setDocsOpen(false)} /> : null}
     </div>
   );
 }
@@ -247,8 +249,24 @@ function dashboardPresenceSessionId() {
   return randomUUID ? randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function ClientDocsModal({ serverUrl, onClose }: { serverUrl?: string | null; onClose: () => void }) {
+function ClientDocsModal({
+  serverUrl,
+  githubProxy,
+  onClose,
+}: {
+  serverUrl?: string | null;
+  githubProxy?: string | null;
+  onClose: () => void;
+}) {
   const resolvedServerUrl = serverUrl || currentOrigin();
+  const linuxAmd64Url = proxiedGithubUrl(
+    "https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-amd64",
+    githubProxy,
+  );
+  const linuxArm64Url = proxiedGithubUrl(
+    "https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-arm64",
+    githubProxy,
+  );
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/45 p-4" role="dialog" aria-modal="true" aria-labelledby="client-docs-title" onClick={onClose}>
       <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-lg border border-border bg-card text-card-foreground shadow-xl" onClick={(event) => event.stopPropagation()}>
@@ -264,22 +282,23 @@ function ClientDocsModal({ serverUrl, onClose }: { serverUrl?: string | null; on
         <div className="grid gap-4 p-5">
           <CommandBlock
             title="Linux amd64"
-            command={clientCommand(
-              "https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-amd64",
-              resolvedServerUrl,
-            )}
+            command={clientCommand(linuxAmd64Url, resolvedServerUrl)}
           />
           <CommandBlock
             title="Linux arm64"
-            command={clientCommand(
-              "https://github.com/Xiechengqi/http-tunnel/releases/download/latest/http-tunnel-client-linux-arm64",
-              resolvedServerUrl,
-            )}
+            command={clientCommand(linuxArm64Url, resolvedServerUrl)}
           />
         </div>
       </div>
     </div>
   );
+}
+
+function proxiedGithubUrl(url: string, githubProxy?: string | null) {
+  const proxy = githubProxy?.trim().replace(/\/+$/, "");
+  if (!proxy) return url;
+  const prefix = `${proxy}/`;
+  return url.startsWith(prefix) ? url : `${prefix}${url}`;
 }
 
 function clientCommand(downloadUrl: string, serverUrl: string) {
@@ -602,7 +621,7 @@ function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
             <TableHead className="w-28 text-right">Requests</TableHead>
             <TableHead className="w-32 text-right">Traffic</TableHead>
             <TableHead className="w-36">Last seen</TableHead>
-            <TableHead className="w-36">Expires</TableHead>
+            <TableHead className="w-40">Lifecycle</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -651,11 +670,23 @@ function TunnelTable({ tunnels }: { tunnels: PublicTunnel[] }) {
                 </div>
               </TableCell>
               <TableCell>{formatDate(tunnel.last_seen_at)}</TableCell>
-              <TableCell>{formatDate(tunnel.expires_at)}</TableCell>
+              <TableCell><TunnelLifecycle tunnel={tunnel} /></TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
+    </div>
+  );
+}
+
+function TunnelLifecycle({ tunnel }: { tunnel: PublicTunnel }) {
+  const lifecycle = tunnelLifecycle(tunnel);
+  return (
+    <div className="grid gap-0.5">
+      <span className={cn("text-sm", lifecycle.tone === "muted" && "text-muted-foreground", lifecycle.tone === "warning" && "text-amber-700 dark:text-amber-300")}>
+        {lifecycle.label}
+      </span>
+      {lifecycle.detail ? <span className="text-xs text-muted-foreground">{lifecycle.detail}</span> : null}
     </div>
   );
 }
@@ -686,8 +717,78 @@ function sourceLabel(tunnel: PublicTunnel) {
 
 function formatDate(value?: string | null) {
   if (!value) return "never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  const date = parseDate(value);
+  if (!date) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function tunnelLifecycle(tunnel: PublicTunnel) {
+  const status = tunnel.status.toLowerCase();
+  if (tunnel.connected || status === "connected") {
+    return {
+      label: "While connected",
+      detail: "No forced expiry",
+      tone: "muted" as const,
+    };
+  }
+
+  if (status === "disconnected") {
+    const expiresAt = addMilliseconds(tunnel.disconnected_at, DISCONNECTED_EXPIRE_MS);
+    return {
+      label: expiresAt ? `Expires ${formatRelativeTime(expiresAt)}` : "Expires after disconnect",
+      detail: expiresAt ? formatDateTime(expiresAt) : "About 10 minutes after disconnect",
+      tone: "warning" as const,
+    };
+  }
+
+  if (status === "expired") {
+    const deletesAt = parseDate(tunnel.claim_expires_at) || addMilliseconds(tunnel.disconnected_at, EXPIRED_DELETE_MS) || addMilliseconds(tunnel.expires_at, EXPIRED_DELETE_MS);
+    return {
+      label: deletesAt ? `Deletes ${formatRelativeTime(deletesAt)}` : "Pending delete",
+      detail: deletesAt ? formatDateTime(deletesAt) : "About 1 hour after expiry",
+      tone: "warning" as const,
+    };
+  }
+
+  return {
+    label: formatDate(tunnel.expires_at),
+    detail: status === "reserved" ? "Reserved tunnel" : undefined,
+    tone: "muted" as const,
+  };
+}
+
+function parseDate(value?: string | null) {
+  if (!value) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addMilliseconds(value: string | null | undefined, milliseconds: number) {
+  const date = parseDate(value);
+  return date ? new Date(date.getTime() + milliseconds) : null;
+}
+
+function formatRelativeTime(date: Date) {
+  const diffMs = date.getTime() - Date.now();
+  const absMs = Math.abs(diffMs);
+  const minutes = Math.max(1, Math.round(absMs / 60_000));
+  const formatter = new Intl.RelativeTimeFormat("en-US", { numeric: "auto" });
+  if (minutes < 60) {
+    return formatter.format(diffMs >= 0 ? minutes : -minutes, "minute");
+  }
+  const hours = Math.max(1, Math.round(minutes / 60));
+  return formatter.format(diffMs >= 0 ? hours : -hours, "hour");
+}
+
+function formatDateTime(date: Date) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "2-digit",

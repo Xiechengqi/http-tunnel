@@ -40,6 +40,7 @@ Upgrade requirements:
 
 - `release_repo` points to `owner/repo`; if omitted, the official `Xiechengqi/http-tunnel` repository is used.
 - `release_tag` is `latest` or a concrete tag. Automatic upgrades only track `latest`.
+- `github_proxy` optionally prefixes GitHub release asset downloads, for example `https://gh-proxy.org/https://github.com/...`.
 - `auto_upgrade_enabled` defaults to `false`. When enabled, it controls the background 5-minute update check. Automatic replacement waits until tunnel proxy traffic has been idle for 10 seconds.
 - Release asset name matches `http-tunnel-server-linux-amd64` or `http-tunnel-server-linux-arm64`.
 - A SHA256 checksum asset is published as `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt`.

@@ -478,6 +478,9 @@ pub(crate) fn validate_server_config(cfg: &ServerConfig) -> Vec<String> {
     if cfg.release_tag.trim().is_empty() {
         errors.push("release_tag is required".to_string());
     }
+    if !cfg.github_proxy.trim().is_empty() && !valid_http_url(&cfg.github_proxy) {
+        errors.push("github_proxy must start with http:// or https://".to_string());
+    }
     for reserved in &cfg.reserved_subdomains {
         if !valid_dns_label(reserved) {
             errors.push(format!(
@@ -898,6 +901,15 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "GitHub release tag used by manual upgrades; automatic upgrades only track latest.",
         ),
         schema(
+            "github_proxy",
+            "Upgrade",
+            "HTTP_TUNNEL_GITHUB_PROXY",
+            false,
+            false,
+            "",
+            "Optional proxy prefix used for GitHub release asset downloads.",
+        ),
+        schema(
             "auto_upgrade_enabled",
             "Upgrade",
             "HTTP_TUNNEL_AUTO_UPGRADE_ENABLED",
@@ -997,7 +1009,7 @@ fn config_field_metadata(key: &str) -> ConfigFieldMetadata {
             ];
             "enum"
         }
-        "turnstile_verify_url" => "url",
+        "turnstile_verify_url" | "github_proxy" => "url",
         "release_repo" => "github_repo",
         "systemd_unit" => "optional_string",
         "turnstile_secret" | "tunnel_create_bearer_token_hash" | "metrics_bearer_token_hash" => {
@@ -1130,6 +1142,7 @@ mod tests {
             heartbeat_interval_seconds: 0,
             stale_session_seconds: 0,
             release_repo: "owner/repo/extra".to_string(),
+            github_proxy: "ftp://bad.example.com".to_string(),
             reserved_subdomains: vec!["Bad_Value".to_string()],
             ..ServerConfig::default()
         };
@@ -1156,6 +1169,7 @@ mod tests {
             .iter()
             .any(|error| error.contains("stale_session_seconds")));
         assert!(errors.iter().any(|error| error.contains("release_repo")));
+        assert!(errors.iter().any(|error| error.contains("github_proxy")));
         assert!(errors
             .iter()
             .any(|error| error.contains("reserved_subdomains")));
@@ -1187,6 +1201,15 @@ mod tests {
             .expect("release repo schema");
         assert!(!release_repo.required);
         assert_eq!(release_repo.default, "Xiechengqi/http-tunnel");
+
+        let github_proxy = schema
+            .iter()
+            .find(|field| field.key == "github_proxy")
+            .expect("github proxy schema");
+        assert_eq!(github_proxy.value_type, "url");
+        assert!(!github_proxy.required);
+        assert_eq!(github_proxy.default, "");
+        assert!(github_proxy.hot_reloadable);
 
         let auto_upgrade = schema
             .iter()

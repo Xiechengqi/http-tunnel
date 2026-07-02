@@ -12,6 +12,7 @@ export type DashboardSummary = {
   setup_required: boolean;
   generated_at_unix_seconds: number;
   server_url?: string | null;
+  github_proxy?: string | null;
   stats: DashboardStats;
   tunnels: PublicTunnel[];
   country_sources: PublicTunnelCountrySource[];
@@ -45,6 +46,8 @@ export type PublicTunnel = {
   source: PublicTunnelSource;
   last_seen_at?: string | null;
   expires_at: string;
+  disconnected_at?: string | null;
+  claim_expires_at?: string | null;
 };
 
 export type PublicTunnelSource = {
@@ -175,6 +178,7 @@ export type UpgradeStatus = {
   release_repo: string;
   effective_release_repo: string;
   release_tag: string;
+  github_proxy?: string | null;
   current_version: string;
   check_interval_seconds: number;
   idle_window_seconds: number;

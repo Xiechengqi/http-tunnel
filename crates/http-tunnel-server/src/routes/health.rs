@@ -38,6 +38,7 @@ pub struct DashboardSummary {
     pub setup_required: bool,
     pub generated_at_unix_seconds: u64,
     pub server_url: Option<String>,
+    pub github_proxy: Option<String>,
     pub stats: DashboardStats,
     pub tunnels: Vec<PublicTunnel>,
     pub country_sources: Vec<PublicTunnelCountrySource>,
@@ -83,6 +84,8 @@ pub struct PublicTunnel {
     pub source: PublicTunnelSource,
     pub last_seen_at: Option<String>,
     pub expires_at: String,
+    pub disconnected_at: Option<String>,
+    pub claim_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +133,7 @@ pub async fn dashboard(State(state): State<AppState>) -> Json<ApiResponse<Dashbo
         setup_required,
         generated_at_unix_seconds: unix_now(),
         server_url: dashboard_server_url(&cfg),
+        github_proxy: cfg.github_proxy_url(),
         stats,
         tunnels,
         country_sources,
@@ -210,7 +214,8 @@ async fn public_tunnels(
     runtime: &HashMap<String, RuntimeTunnelMetrics>,
 ) -> Vec<PublicTunnel> {
     let rows = sqlx::query(
-        "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.client_ip, \
+        "SELECT t.id, t.subdomain, t.status, t.enabled, t.expires_at, t.disconnected_at, \
+                t.claim_expires_at, t.client_ip, \
                 ls.remote_addr AS latest_remote_addr, ls.client_reported_ip AS latest_reported_ip, \
                 ls.client_country_code AS latest_country_code, \
                 ls.client_country AS latest_country, ls.last_seen_at AS latest_seen_at, \
@@ -299,6 +304,14 @@ async fn public_tunnels(
                     .ok()
                     .flatten(),
                 expires_at: row.get::<String, _>("expires_at"),
+                disconnected_at: row
+                    .try_get::<Option<String>, _>("disconnected_at")
+                    .ok()
+                    .flatten(),
+                claim_expires_at: row
+                    .try_get::<Option<String>, _>("claim_expires_at")
+                    .ok()
+                    .flatten(),
             }
         })
         .collect()

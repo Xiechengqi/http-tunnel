@@ -836,6 +836,7 @@ function VersionPanel({
             ["auto upgrade", upgrade.auto_upgrade_enabled ? "enabled" : "disabled"],
             ["release repo", upgrade.effective_release_repo],
             ["release tag", upgrade.release_tag],
+            ["github proxy", upgrade.github_proxy || "none"],
             ["latest tag", upgrade.latest_tag || "not checked"],
             ["update", upgrade.update_available == null ? "unknown" : upgrade.update_available ? "available" : "none"],
             ["last check", upgrade.last_checked_at || "never"],
