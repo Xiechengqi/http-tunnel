@@ -2,14 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import {
-  Activity,
+  ArrowDown,
+  ArrowUp,
   BookOpen,
   ExternalLink,
   Globe2,
   MapPinned,
   Network,
   Search,
-  Waves,
   X,
 } from "lucide-react";
 import WorldMap, { regions, type CountryContext, type DataItem } from "react-svg-worldmap";
@@ -724,14 +724,14 @@ function TunnelTable({
                 </TableCell>
                 <TableCell className="text-right">
                   <TrafficCell
-                    icon={<Activity className="h-3.5 w-3.5" />}
+                    icon={<ArrowDown className="h-3.5 w-3.5" />}
                     rate={rate.inBytesPerSecond}
                     total={tunnel.bytes_in}
                   />
                 </TableCell>
                 <TableCell className="text-right">
                   <TrafficCell
-                    icon={<Waves className="h-3.5 w-3.5" />}
+                    icon={<ArrowUp className="h-3.5 w-3.5" />}
                     rate={rate.outBytesPerSecond}
                     total={tunnel.bytes_out}
                   />
