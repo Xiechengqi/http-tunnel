@@ -25,6 +25,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use http_tunnel_common::{
     api::ApiResponse,
+    country::{country_code_from_name, normalize_country_code as normalize_reported_country_code},
     ids::{generate_event_id, generate_session_id, generate_tunnel_id},
     ip::parse_public_ip,
     password::hash_password,
@@ -173,6 +174,7 @@ fn resolve_client_source(
     let reported_ip = report.and_then(|report| parse_public_ip(&report.public_ip));
     let reported_country = reported_ip.and_then(|ip| geoip::lookup_country(&cfg.data_dir, ip));
     let reported_ip = reported_ip.map(|ip| ip.to_string());
+    let reported_hint = report.and_then(reported_country_hint);
 
     if let Some(country_code) = source.header_country_code.clone() {
         return ResolvedClientSource {
@@ -192,6 +194,15 @@ fn resolve_client_source(
         };
     }
 
+    if let Some((country_code, country)) = reported_hint {
+        return ResolvedClientSource {
+            country_code: Some(country_code),
+            country,
+            country_source: Some("client_report"),
+            reported_ip,
+        };
+    }
+
     if let Some(country) = source.remote_country.clone() {
         return ResolvedClientSource {
             country_code: Some(country.country_code),
@@ -207,6 +218,26 @@ fn resolve_client_source(
         country_source: None,
         reported_ip,
     }
+}
+
+fn reported_country_hint(report: &ClientSourceReport) -> Option<(String, Option<String>)> {
+    let country = report
+        .country
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let country_code = report
+        .country_code
+        .as_deref()
+        .and_then(normalize_reported_country_code)
+        .or_else(|| {
+            country
+                .as_deref()
+                .and_then(country_code_from_name)
+                .map(ToString::to_string)
+        })?;
+    Some((country_code, country))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2388,6 +2419,8 @@ mod tests {
         };
         let report = ClientSourceReport {
             public_ip: "127.0.0.1".to_string(),
+            country_code: None,
+            country: None,
             checked_at_unix_seconds: Some(1),
         };
 
@@ -2411,6 +2444,8 @@ mod tests {
         };
         let report = ClientSourceReport {
             public_ip: "10.0.0.1".to_string(),
+            country_code: None,
+            country: None,
             checked_at_unix_seconds: Some(1),
         };
 
@@ -2432,6 +2467,8 @@ mod tests {
         };
         let report = ClientSourceReport {
             public_ip: "8.8.8.8".to_string(),
+            country_code: None,
+            country: None,
             checked_at_unix_seconds: Some(1),
         };
 
@@ -2439,6 +2476,29 @@ mod tests {
 
         assert_eq!(resolved.country_code, None);
         assert_eq!(resolved.country_source, None);
+        assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
+    }
+
+    #[test]
+    fn client_reported_country_is_fallback_without_geoip_match() {
+        let cfg = http_tunnel_common::ServerConfig::default();
+        let source = ClientSource {
+            ip: "198.51.100.10".to_string(),
+            header_country_code: None,
+            remote_country: None,
+        };
+        let report = ClientSourceReport {
+            public_ip: "8.8.8.8".to_string(),
+            country_code: Some("US".to_string()),
+            country: Some("United States".to_string()),
+            checked_at_unix_seconds: Some(1),
+        };
+
+        let resolved = resolve_client_source(&cfg, &source, Some(&report));
+
+        assert_eq!(resolved.country_code.as_deref(), Some("US"));
+        assert_eq!(resolved.country.as_deref(), Some("United States"));
+        assert_eq!(resolved.country_source, Some("client_report"));
         assert_eq!(resolved.reported_ip.as_deref(), Some("8.8.8.8"));
     }
 }

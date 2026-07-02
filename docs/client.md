@@ -20,9 +20,9 @@ subdomain = "demo"
 target = "http://127.0.0.1:3000"
 persist_token = true
 public_ip_lookup_urls = [
+  "http://3.0.3.0",
   "https://api64.ipify.org?format=json",
   "https://api.ipify.org?format=json",
-  "http://3.0.3.0",
 ]
 public_ip_refresh_seconds = 3600
 # optional when public tunnel creation is disabled:
@@ -47,7 +47,7 @@ http-tunnel-client config set --server https://example.com --target http://127.0
 http-tunnel-client config set --tunnel-id tun_123 --token <token> --url https://demo.example.com
 http-tunnel-client config set --create-token <admin-generated-create-token>
 http-tunnel-client config set --persist-token false
-http-tunnel-client config set --public-ip-lookup-url https://api64.ipify.org?format=json --public-ip-refresh-seconds 3600
+http-tunnel-client config set --public-ip-lookup-url http://3.0.3.0 --public-ip-lookup-url https://api64.ipify.org?format=json --public-ip-refresh-seconds 3600
 http-tunnel-client config clear-token
 ```
 

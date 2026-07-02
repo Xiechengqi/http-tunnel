@@ -1,6 +1,7 @@
 pub mod api;
 pub mod build_info;
 pub mod config;
+pub mod country;
 pub mod error;
 pub mod headers;
 pub mod ids;

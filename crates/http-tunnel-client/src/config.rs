@@ -98,7 +98,7 @@ token = "secret"
 url = "https://demo.example.com"
 create_token = "create-secret"
 persist_token = false
-public_ip_lookup_urls = ["https://api64.ipify.org?format=json"]
+public_ip_lookup_urls = ["http://3.0.3.0", "https://api64.ipify.org?format=json"]
 public_ip_refresh_seconds = 3600
 "#,
         )
@@ -113,7 +113,10 @@ public_ip_refresh_seconds = 3600
         assert_eq!(cfg.persist_token, Some(false));
         assert_eq!(
             cfg.public_ip_lookup_urls.as_ref().unwrap(),
-            &vec!["https://api64.ipify.org?format=json".to_string()]
+            &vec![
+                "http://3.0.3.0".to_string(),
+                "https://api64.ipify.org?format=json".to_string()
+            ]
         );
         assert_eq!(cfg.public_ip_refresh_seconds, Some(3600));
     }

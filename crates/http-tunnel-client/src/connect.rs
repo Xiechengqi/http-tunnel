@@ -7,7 +7,11 @@ use crate::{
 use anyhow::Context;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use http_tunnel_common::{api::ApiResponse, ip::parse_public_ip};
+use http_tunnel_common::{
+    api::ApiResponse,
+    country::{country_code_from_name, country_from_location, normalize_country_code},
+    ip::parse_public_ip,
+};
 use http_tunnel_protocol::{
     decode_frame, encode_frame,
     types::{
@@ -53,15 +57,22 @@ const DEFAULT_PUBLIC_IP_REFRESH_SECONDS: u64 = 3600;
 const MIN_PUBLIC_IP_REFRESH_SECONDS: u64 = 60;
 const PUBLIC_IP_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_PUBLIC_IP_LOOKUP_URLS: &[&str] = &[
+    "http://3.0.3.0",
     "https://api64.ipify.org?format=json",
     "https://api.ipify.org?format=json",
-    "http://3.0.3.0",
 ];
 
 #[derive(Debug, Clone)]
 struct PublicIpLookup {
     urls: Vec<String>,
     refresh_interval: Duration,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PublicIpLookupResponse {
+    public_ip: Option<String>,
+    country_code: Option<String>,
+    country: Option<String>,
 }
 
 impl PublicIpLookup {
@@ -705,18 +716,22 @@ fn next_reconnect_delay(current: std::time::Duration) -> std::time::Duration {
 }
 
 async fn lookup_client_source(public_ip_lookup: &PublicIpLookup) -> Option<ClientSourceReport> {
-    let public_ip = lookup_public_ip(public_ip_lookup).await?;
+    let lookup = lookup_public_ip(public_ip_lookup).await?;
+    let public_ip = lookup.public_ip?;
     Some(ClientSourceReport {
         public_ip,
+        country_code: lookup.country_code,
+        country: lookup.country,
         checked_at_unix_seconds: Some(unix_now()),
     })
 }
 
-async fn lookup_public_ip(public_ip_lookup: &PublicIpLookup) -> Option<String> {
+async fn lookup_public_ip(public_ip_lookup: &PublicIpLookup) -> Option<PublicIpLookupResponse> {
     if public_ip_lookup.urls.is_empty() {
         return None;
     }
     let client = reqwest::Client::new();
+    let mut best = PublicIpLookupResponse::default();
     for url in &public_ip_lookup.urls {
         let request = client.get(url);
         let response = match tokio::time::timeout(PUBLIC_IP_LOOKUP_TIMEOUT, request.send()).await {
@@ -741,24 +756,84 @@ async fn lookup_public_ip(public_ip_lookup: &PublicIpLookup) -> Option<String> {
                 continue;
             }
         };
-        if let Some(ip) = parse_public_ip_response(&body) {
-            return Some(ip);
+        let parsed = parse_public_ip_response(&body);
+        if best.public_ip.is_none() {
+            best.public_ip = parsed.public_ip;
+        }
+        if best.country_code.is_none() {
+            best.country_code = parsed.country_code;
+        }
+        if best.country.is_none() {
+            best.country = parsed.country;
+        }
+        if best.public_ip.is_some() && best.country_code.is_some() {
+            return Some(best);
         }
         tracing::debug!(%url, "public IP lookup returned no public IP");
     }
-    None
+    best.public_ip.as_ref()?;
+    Some(best)
 }
 
-fn parse_public_ip_response(body: &str) -> Option<String> {
+fn parse_public_ip_response(body: &str) -> PublicIpLookupResponse {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(ip) = value.get("ip").and_then(|value| value.as_str()) {
-            return parse_public_ip_candidate(ip);
-        }
-        if let Some(origin) = value.get("origin").and_then(|value| value.as_str()) {
-            return parse_public_ip_candidate(origin);
-        }
+        return parse_public_ip_json(&value);
     }
-    parse_public_ip_candidate(body)
+    PublicIpLookupResponse {
+        public_ip: parse_public_ip_candidate(body),
+        ..PublicIpLookupResponse::default()
+    }
+}
+
+fn parse_public_ip_json(value: &serde_json::Value) -> PublicIpLookupResponse {
+    let public_ip = value
+        .get("ip")
+        .and_then(|value| value.as_str())
+        .and_then(parse_public_ip_candidate)
+        .or_else(|| {
+            value
+                .get("origin")
+                .and_then(|value| value.as_str())
+                .and_then(parse_public_ip_candidate)
+        });
+    let country_code = first_json_string(value, &["country_code", "countryCode"])
+        .and_then(normalize_country_code)
+        .or_else(|| first_json_string(value, &["country"]).and_then(country_code_from_json_country))
+        .or_else(|| {
+            first_json_string(value, &["location"])
+                .and_then(country_from_location)
+                .map(|(code, _)| code.to_string())
+        });
+    let country = first_json_string(value, &["country_name", "countryName"])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            first_json_string(value, &["country"]).and_then(|value| {
+                normalize_country_code(value)
+                    .is_none()
+                    .then(|| value.trim().to_string())
+            })
+        })
+        .or_else(|| {
+            first_json_string(value, &["location"])
+                .and_then(country_from_location)
+                .map(|(_, country)| country)
+        });
+
+    PublicIpLookupResponse {
+        public_ip,
+        country_code,
+        country,
+    }
+}
+
+fn first_json_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| value.get(*key)?.as_str())
+}
+
+fn country_code_from_json_country(value: &str) -> Option<String> {
+    normalize_country_code(value).or_else(|| country_code_from_name(value).map(ToString::to_string))
 }
 
 fn parse_public_ip_candidate(value: &str) -> Option<String> {
@@ -830,17 +905,40 @@ mod tests {
     fn parses_public_ip_lookup_responses() {
         assert_eq!(
             parse_public_ip_response(r#"{"ip":"183.193.183.90","location":"x"}"#),
-            Some("183.193.183.90".to_string())
+            PublicIpLookupResponse {
+                public_ip: Some("183.193.183.90".to_string()),
+                country_code: None,
+                country: None,
+            }
+        );
+        assert_eq!(
+            parse_public_ip_response(r#"{"ip":"183.193.183.90","location":"中国–上海–上海 移动"}"#),
+            PublicIpLookupResponse {
+                public_ip: Some("183.193.183.90".to_string()),
+                country_code: Some("CN".to_string()),
+                country: Some("中国".to_string()),
+            }
         );
         assert_eq!(
             parse_public_ip_response(r#"{"origin":"8.8.8.8, 1.1.1.1"}"#),
-            Some("8.8.8.8".to_string())
+            PublicIpLookupResponse {
+                public_ip: Some("8.8.8.8".to_string()),
+                country_code: None,
+                country: None,
+            }
         );
         assert_eq!(
             parse_public_ip_response("2606:4700:4700::1111\n"),
-            Some("2606:4700:4700::1111".to_string())
+            PublicIpLookupResponse {
+                public_ip: Some("2606:4700:4700::1111".to_string()),
+                country_code: None,
+                country: None,
+            }
         );
-        assert_eq!(parse_public_ip_response(r#"{"ip":"127.0.0.1"}"#), None);
+        assert_eq!(
+            parse_public_ip_response(r#"{"ip":"127.0.0.1"}"#),
+            PublicIpLookupResponse::default()
+        );
     }
 
     #[test]

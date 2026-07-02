@@ -28,6 +28,10 @@ pub struct HelloAck {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClientSourceReport {
     pub public_ip: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
     #[serde(default)]
     pub checked_at_unix_seconds: Option<u64>,
 }
@@ -139,7 +143,26 @@ mod tests {
             hello.client_source,
             Some(ClientSourceReport {
                 public_ip: "8.8.8.8".to_string(),
+                country_code: None,
+                country: None,
                 checked_at_unix_seconds: Some(123),
+            })
+        );
+    }
+
+    #[test]
+    fn hello_accepts_client_source_country_hint() {
+        let hello: Hello = serde_json::from_str(
+            r#"{"target":"http://127.0.0.1:3000","client_source":{"public_ip":"8.8.8.8","country_code":"US","country":"United States"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            hello.client_source,
+            Some(ClientSourceReport {
+                public_ip: "8.8.8.8".to_string(),
+                country_code: Some("US".to_string()),
+                country: Some("United States".to_string()),
+                checked_at_unix_seconds: None,
             })
         );
     }

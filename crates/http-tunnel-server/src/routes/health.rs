@@ -434,6 +434,14 @@ fn public_source(
     source_present: bool,
 ) -> PublicTunnelSource {
     let Some(country_code) = country_code else {
+        if let Some(country) = country.filter(|value| !value.trim().is_empty()) {
+            return PublicTunnelSource {
+                label: country.clone(),
+                country_code: None,
+                country: Some(country),
+                located: false,
+            };
+        }
         return PublicTunnelSource {
             label: if source_present {
                 "Unknown country".to_string()
