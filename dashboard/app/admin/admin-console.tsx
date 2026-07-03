@@ -81,6 +81,7 @@ const configPages = [
   { value: "retention", label: "Retention", categories: ["Retention"] },
   { value: "inspector", label: "Inspector", categories: ["Inspector"] },
   { value: "upgrade", label: "Upgrade", categories: ["Upgrade"] },
+  { value: "github", label: "GitHub", categories: ["GitHub Proxy Server"] },
   { value: "raw", label: "Raw", categories: [] },
 ] as const;
 type ConfigPage = (typeof configPages)[number]["value"];
