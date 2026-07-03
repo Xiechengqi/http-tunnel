@@ -101,14 +101,14 @@ export default function PublicDashboardPage() {
     if (!filtered) return summary.country_sources || [];
     return countrySourcesFromTunnels(filteredTunnels);
   }, [filteredTunnels, summary]);
-  const visibleClientCount = useMemo(
-    () => filteredTunnels.reduce((total, tunnel) => total + tunnel.active_sessions, 0),
+  const visibleOnlineTunnelCount = useMemo(
+    () => filteredTunnels.filter((tunnel) => tunnel.connected).length,
     [filteredTunnels],
   );
-  const visibleUnknownClientCount = useMemo(() => {
-    const known = visibleCountrySources.reduce((total, country) => total + country.client_count, 0);
-    return Math.max(0, visibleClientCount - known);
-  }, [visibleClientCount, visibleCountrySources]);
+  const visibleUnknownTunnelCount = useMemo(() => {
+    const known = visibleCountrySources.reduce((total, country) => total + country.tunnel_count, 0);
+    return Math.max(0, visibleOnlineTunnelCount - known);
+  }, [visibleOnlineTunnelCount, visibleCountrySources]);
 
   const status = error
     ? "Unable to load dashboard"
@@ -136,7 +136,7 @@ export default function PublicDashboardPage() {
               <MetricCard label="tunnels" value={formatNumber(summary.stats.total_tunnels)} tone="blue" />
               <MetricCard label="online" value={formatNumber(summary.stats.online_tunnels)} tone="green" />
               <MetricCard label="offline" value={formatNumber(summary.stats.offline_tunnels)} tone={summary.stats.offline_tunnels ? "amber" : "muted"} />
-              <MetricCard label="sessions" value={formatNumber(summary.stats.active_sessions)} tone="green" />
+              <MetricCard label="countries" value={formatNumber(summary.country_sources.length)} tone="blue" />
               <MetricCard label="requests" value={formatNumber(summary.stats.request_count)} tone="blue" />
               <MetricCard label="errors" value={formatNumber(summary.stats.error_count)} tone={summary.stats.error_count ? "red" : "muted"} />
             </section>
@@ -152,8 +152,8 @@ export default function PublicDashboardPage() {
               <CardContent className="p-0">
                 <TunnelSourceMap
                   countries={visibleCountrySources}
-                  totalClients={visibleClientCount}
-                  unknownClients={visibleUnknownClientCount}
+                  totalTunnels={visibleOnlineTunnelCount}
+                  unknownTunnels={visibleUnknownTunnelCount}
                 />
               </CardContent>
             </Card>
@@ -382,12 +382,12 @@ function CommandBlock({ title, command }: { title: string; command: string }) {
 
 function TunnelSourceMap({
   countries,
-  totalClients,
-  unknownClients,
+  totalTunnels,
+  unknownTunnels,
 }: {
   countries: PublicTunnelCountrySource[];
-  totalClients: number;
-  unknownClients: number;
+  totalTunnels: number;
+  unknownTunnels: number;
 }) {
   const mapRootRef = useRef<HTMLDivElement | null>(null);
   const [mapFrameRef, mapFrameSize] = useElementSize<HTMLDivElement>();
@@ -403,11 +403,11 @@ function TunnelSourceMap({
     () =>
       regions.map((region) => ({
         country: region.code.toLowerCase(),
-        value: countryMeta.get(region.code.toUpperCase())?.client_count || 0,
+        value: countryMeta.get(region.code.toUpperCase())?.tunnel_count || 0,
       })) as DataItem<number>[],
     [countryMeta],
   );
-  const maxClients = countries.reduce((max, country) => Math.max(max, country.client_count), 0);
+  const maxTunnels = countries.reduce((max, country) => Math.max(max, country.tunnel_count), 0);
   const mapFrameWidth = mapFrameSize.width;
   const mapSize = Math.max(640, Math.ceil(mapFrameWidth || 960));
   const mapVisualHeight = mapSize * 0.75;
@@ -454,7 +454,6 @@ function TunnelSourceMap({
     setTooltip({
       code,
       name: source?.country || COUNTRY_NAMES.get(code) || region.name || code,
-      clientCount: source?.client_count || 0,
       tunnelCount: source?.tunnel_count || 0,
       x: event.clientX - bounds.left,
       y: event.clientY - bounds.top,
@@ -517,7 +516,7 @@ function TunnelSourceMap({
             borderColor="rgba(14, 116, 144, 0.22)"
             containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
             tooltipTextFunction={() => ""}
-            styleFunction={(context) => countryStyle(context, maxClients)}
+            styleFunction={(context) => countryStyle(context, maxTunnels)}
           />
         </div>
       </div>
@@ -535,7 +534,6 @@ function TunnelSourceMap({
             <span className="shrink-0 text-muted-foreground">{tooltip.code}</span>
           </div>
           <div className="mt-1 grid gap-0.5 text-muted-foreground">
-            <span>Clients: {formatNumber(tooltip.clientCount)}</span>
             <span>Tunnels: {formatNumber(tooltip.tunnelCount)}</span>
           </div>
         </div>
@@ -543,14 +541,14 @@ function TunnelSourceMap({
       <div className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
           <span className="h-2.5 w-10 rounded-sm bg-gradient-to-r from-sky-100 to-sky-500 ring-1 ring-border" />
-          <span>{formatNumber(totalClients)} active clients</span>
+          <span>{formatNumber(totalTunnels)} online tunnels</span>
         </div>
-        {unknownClients > 0 ? <span>{formatNumber(unknownClients)} unknown</span> : null}
+        {unknownTunnels > 0 ? <span>{formatNumber(unknownTunnels)} unknown</span> : null}
       </div>
       {countries.length === 0 ? (
         <div className="absolute inset-0 flex items-center justify-center px-4">
           <div className="rounded-md border border-border bg-background/80 px-4 py-3 text-center text-sm text-muted-foreground shadow-sm backdrop-blur">
-            {totalClients > 0 ? "No country data for active clients" : "No active clients"}
+            {totalTunnels > 0 ? "No country data for online tunnels" : "No online tunnels"}
           </div>
         </div>
       ) : null}
@@ -561,7 +559,6 @@ function TunnelSourceMap({
 type MapTooltipState = {
   code: string;
   name: string;
-  clientCount: number;
   tunnelCount: number;
   x: number;
   y: number;
@@ -640,9 +637,9 @@ function writeStoredMapOffsetRatio(value: number) {
   }
 }
 
-function countryStyle(context: CountryContext<number>, maxClients: number) {
+function countryStyle(context: CountryContext<number>, maxTunnels: number) {
   const value = Number(context.countryValue || 0);
-  if (!value || !maxClients) {
+  if (!value || !maxTunnels) {
     return {
       fill: "rgba(186, 230, 253, 0.34)",
       stroke: "rgba(14, 116, 144, 0.22)",
@@ -650,7 +647,7 @@ function countryStyle(context: CountryContext<number>, maxClients: number) {
       cursor: "grab",
     };
   }
-  const intensity = Math.max(0.22, Math.min(1, value / maxClients));
+  const intensity = Math.max(0.22, Math.min(1, value / maxTunnels));
   return {
     fill: `rgba(10, 148, 242, ${0.28 + intensity * 0.62})`,
     stroke: "rgba(7, 89, 133, 0.42)",
@@ -671,13 +668,11 @@ function TunnelTable({
   }
   return (
     <div className="overflow-x-auto">
-      <Table className="min-w-[1160px]">
+      <Table className="min-w-[980px]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-[260px]">Tunnel</TableHead>
             <TableHead>Source</TableHead>
-            <TableHead className="w-24 text-right">Sessions</TableHead>
-            <TableHead className="w-24 text-right">Streams</TableHead>
             <TableHead className="w-28 text-right">Requests</TableHead>
             <TableHead className="w-40 text-right">In</TableHead>
             <TableHead className="w-40 text-right">Out</TableHead>
@@ -716,8 +711,6 @@ function TunnelTable({
                     <span className="max-w-[220px] truncate">{sourceLabel(tunnel)}</span>
                   </div>
                 </TableCell>
-                <TableCell className="text-right">{formatNumber(tunnel.active_sessions)}</TableCell>
-                <TableCell className="text-right">{formatNumber(tunnel.active_streams)}</TableCell>
                 <TableCell className="text-right">
                   <div>{formatNumber(tunnel.request_count)}</div>
                   {tunnel.error_count ? <div className="text-xs text-red-700 dark:text-red-300">{formatNumber(tunnel.error_count)} errors</div> : null}
@@ -780,7 +773,7 @@ function countrySourcesFromTunnels(tunnels: PublicTunnel[]): PublicTunnelCountry
   const byCountry = new Map<string, PublicTunnelCountrySource>();
   for (const tunnel of tunnels) {
     const code = tunnel.source.country_code?.toUpperCase();
-    if (!code || !tunnel.active_sessions) continue;
+    if (!code || !tunnel.connected) continue;
     const current = byCountry.get(code) || {
       country_code: code,
       country: tunnel.source.country || COUNTRY_NAMES.get(code) || code,
@@ -791,7 +784,7 @@ function countrySourcesFromTunnels(tunnels: PublicTunnel[]): PublicTunnelCountry
     current.tunnel_count += 1;
     byCountry.set(code, current);
   }
-  return Array.from(byCountry.values()).sort((a, b) => b.client_count - a.client_count || a.country_code.localeCompare(b.country_code));
+  return Array.from(byCountry.values()).sort((a, b) => b.tunnel_count - a.tunnel_count || a.country_code.localeCompare(b.country_code));
 }
 
 function sourceLabel(tunnel: PublicTunnel) {
