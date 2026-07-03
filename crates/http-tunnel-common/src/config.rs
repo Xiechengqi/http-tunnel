@@ -54,6 +54,14 @@ pub struct ServerConfig {
     pub release_repo: String,
     pub release_tag: String,
     pub github_proxy: String,
+    pub github_proxy_server_enabled: bool,
+    pub github_proxy_server_path_prefix: String,
+    pub github_proxy_server_size_limit_bytes: u64,
+    pub github_proxy_server_jsdelivr: bool,
+    pub github_proxy_server_white_list: Vec<String>,
+    pub github_proxy_server_black_list: Vec<String>,
+    pub github_proxy_server_pass_list: Vec<String>,
+    pub github_proxy_server_request_timeout_seconds: u64,
     pub auto_upgrade_enabled: bool,
     pub systemd_unit: Option<String>,
 }
@@ -110,6 +118,14 @@ impl Default for ServerConfig {
             release_repo: "Xiechengqi/http-tunnel".to_string(),
             release_tag: "latest".to_string(),
             github_proxy: String::new(),
+            github_proxy_server_enabled: false,
+            github_proxy_server_path_prefix: "/gh".to_string(),
+            github_proxy_server_size_limit_bytes: 1024 * 1024 * 1024 * 999,
+            github_proxy_server_jsdelivr: false,
+            github_proxy_server_white_list: Vec::new(),
+            github_proxy_server_black_list: Vec::new(),
+            github_proxy_server_pass_list: Vec::new(),
+            github_proxy_server_request_timeout_seconds: 300,
             auto_upgrade_enabled: false,
             systemd_unit: None,
         }
@@ -332,6 +348,36 @@ impl ServerConfig {
         if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY") {
             self.github_proxy = v;
         }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED") {
+            self.github_proxy_server_enabled =
+                parse_bool("HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED", &v)?;
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_PATH_PREFIX") {
+            self.github_proxy_server_path_prefix = v;
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_SIZE_LIMIT_BYTES") {
+            self.github_proxy_server_size_limit_bytes =
+                parse_env("HTTP_TUNNEL_GITHUB_PROXY_SERVER_SIZE_LIMIT_BYTES", &v)?;
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_JSDELIVR") {
+            self.github_proxy_server_jsdelivr =
+                parse_bool("HTTP_TUNNEL_GITHUB_PROXY_SERVER_JSDELIVR", &v)?;
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_WHITE_LIST") {
+            self.github_proxy_server_white_list = parse_list_env(&v);
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_BLACK_LIST") {
+            self.github_proxy_server_black_list = parse_list_env(&v);
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_PASS_LIST") {
+            self.github_proxy_server_pass_list = parse_list_env(&v);
+        }
+        if let Ok(v) = env::var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_REQUEST_TIMEOUT_SECONDS") {
+            self.github_proxy_server_request_timeout_seconds = parse_env(
+                "HTTP_TUNNEL_GITHUB_PROXY_SERVER_REQUEST_TIMEOUT_SECONDS",
+                &v,
+            )?;
+        }
         if let Ok(v) = env::var("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED") {
             self.auto_upgrade_enabled = parse_bool("HTTP_TUNNEL_AUTO_UPGRADE_ENABLED", &v)?;
         }
@@ -358,6 +404,15 @@ fn parse_bool(name: &str, value: &str) -> Result<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(CommonError::Config(format!("invalid {name}: {value}"))),
     }
+}
+
+fn parse_list_env(value: &str) -> Vec<String> {
+    value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub fn config_path(cli_path: Option<String>) -> String {
@@ -497,5 +552,66 @@ mod tests {
             cfg.proxied_github_url("https://github.com/Xiechengqi/http-tunnel/releases/latest"),
             "https://github.com/Xiechengqi/http-tunnel/releases/latest"
         );
+    }
+
+    #[test]
+    fn github_proxy_server_env_overrides_are_parsed_independently() {
+        let _guard = env_lock().lock().unwrap();
+        let keys = [
+            "HTTP_TUNNEL_CONFIG",
+            "HTTP_TUNNEL_GITHUB_PROXY",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_PATH_PREFIX",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_SIZE_LIMIT_BYTES",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_JSDELIVR",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_WHITE_LIST",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_BLACK_LIST",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_PASS_LIST",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_REQUEST_TIMEOUT_SECONDS",
+        ];
+        for key in keys {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+        unsafe {
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY", "https://external.example/proxy");
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED", "true");
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_PATH_PREFIX", "/github");
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_SIZE_LIMIT_BYTES", "4096");
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_JSDELIVR", "true");
+            env::set_var(
+                "HTTP_TUNNEL_GITHUB_PROXY_SERVER_WHITE_LIST",
+                "owner/repo,*/mirror\nsingle-owner",
+            );
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_BLACK_LIST", "bad/repo");
+            env::set_var("HTTP_TUNNEL_GITHUB_PROXY_SERVER_PASS_LIST", "pass/repo");
+            env::set_var(
+                "HTTP_TUNNEL_GITHUB_PROXY_SERVER_REQUEST_TIMEOUT_SECONDS",
+                "15",
+            );
+        }
+
+        let cfg = ServerConfig::load("/tmp/http-tunnel-missing-config-for-github-proxy-test.toml")
+            .expect("load config with env");
+
+        assert_eq!(cfg.github_proxy, "https://external.example/proxy");
+        assert!(cfg.github_proxy_server_enabled);
+        assert_eq!(cfg.github_proxy_server_path_prefix, "/github");
+        assert_eq!(cfg.github_proxy_server_size_limit_bytes, 4096);
+        assert!(cfg.github_proxy_server_jsdelivr);
+        assert_eq!(
+            cfg.github_proxy_server_white_list,
+            ["owner/repo", "*/mirror", "single-owner"]
+        );
+        assert_eq!(cfg.github_proxy_server_black_list, ["bad/repo"]);
+        assert_eq!(cfg.github_proxy_server_pass_list, ["pass/repo"]);
+        assert_eq!(cfg.github_proxy_server_request_timeout_seconds, 15);
+
+        for key in keys {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
     }
 }

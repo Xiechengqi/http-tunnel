@@ -81,7 +81,9 @@ Upgrade status reports the configured release repository, effective default repo
 
 Upgrade checksum assets must be published beside the server asset. The resolver accepts `<asset>.sha256`, `<asset>.sha256sum`, `SHA256SUMS`, `SHA256SUMS.txt`, or `checksums.txt`. Aggregate checksum files must contain a 64-character SHA256 value and the matching server asset filename. `POST /api/admin/upgrade` skips same-version/current-checksum releases, rejects missing or unparsable checksums, and verifies the downloaded binary before the `--help` probe and replacement.
 
-`pending_restart` is persisted when restart-required config fields change, including listen address, domain, public scheme, database URL, and data dir.
+`pending_restart` is persisted when restart-required config fields change, including listen address, domain, public scheme, database URL, data dir, and `github_proxy_server_path_prefix`.
+
+The optional GitHub Proxy Server is controlled by `github_proxy_server_*` fields. It is a public root-domain proxy service, not the self-upgrade `github_proxy` setting. Enabling it requires this server to reach GitHub directly, and requests are served from the configured root path such as `/gh/https://github.com/owner/repo/archive/main.zip`.
 
 `GET /api/admin/config` returns a safe config view. It does not expose password hashes, admin session secrets, reconnect token secrets, Turnstile secrets, metrics bearer-token hashes, or tunnel creation bearer-token hashes. Config save and validation preserve existing secrets when these fields are omitted.
 

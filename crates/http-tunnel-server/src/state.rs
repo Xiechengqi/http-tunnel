@@ -24,6 +24,9 @@ pub struct AppState {
     pub upgrade_events: broadcast::Sender<String>,
     pub upgrade_lock: Arc<Mutex<()>>,
     pub startup_binary_sha256: Option<String>,
+    pub github_proxy_route_prefix: String,
+    pub github_proxy_client: reqwest::Client,
+    pub github_proxy_active_streams: Arc<AtomicUsize>,
     pub last_proxy_activity_unix_ms: Arc<AtomicU64>,
     pub started_at: SystemTime,
     next_stream_id: Arc<AtomicU64>,
@@ -190,6 +193,7 @@ impl AppState {
         config: ServerConfig,
         pool: SqlitePool,
         startup_binary_sha256: Option<String>,
+        github_proxy_route_prefix: String,
     ) -> Self {
         let (upgrade_events, _) = broadcast::channel(128);
         Self {
@@ -206,6 +210,13 @@ impl AppState {
             upgrade_events,
             upgrade_lock: Arc::new(Mutex::new(())),
             startup_binary_sha256,
+            github_proxy_route_prefix,
+            github_proxy_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(format!("http-tunnel/{}", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("valid github proxy client"),
+            github_proxy_active_streams: Arc::new(AtomicUsize::new(0)),
             last_proxy_activity_unix_ms: Arc::new(AtomicU64::new(unix_now_millis())),
             started_at: SystemTime::now(),
             next_stream_id: Arc::new(AtomicU64::new(1)),
@@ -404,8 +415,21 @@ impl AppState {
             .store(unix_now_millis(), Ordering::Relaxed);
     }
 
+    pub fn start_github_proxy_activity(&self) -> GithubProxyActivityGuard {
+        self.github_proxy_active_streams
+            .fetch_add(1, Ordering::Relaxed);
+        self.mark_proxy_activity();
+        GithubProxyActivityGuard {
+            active_streams: self.github_proxy_active_streams.clone(),
+            last_activity_unix_ms: self.last_proxy_activity_unix_ms.clone(),
+        }
+    }
+
     pub async fn proxy_idle_for(&self, duration: Duration) -> bool {
         if !self.pending_streams.read().await.is_empty() {
+            return false;
+        }
+        if self.github_proxy_active_streams.load(Ordering::Relaxed) > 0 {
             return false;
         }
         let last = self.last_proxy_activity_unix_ms.load(Ordering::Relaxed);
@@ -524,6 +548,23 @@ pub fn effective_session_pool_policy(config: &ServerConfig) -> SessionPoolPolicy
             SessionPoolPolicy::SingleReject
         }
         _ => SessionPoolPolicy::SingleReplace,
+    }
+}
+
+pub struct GithubProxyActivityGuard {
+    active_streams: Arc<AtomicUsize>,
+    last_activity_unix_ms: Arc<AtomicU64>,
+}
+
+impl Drop for GithubProxyActivityGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .active_streams
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            });
+        self.last_activity_unix_ms
+            .store(unix_now_millis(), Ordering::Relaxed);
     }
 }
 

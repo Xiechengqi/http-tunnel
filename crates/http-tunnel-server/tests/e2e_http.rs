@@ -135,6 +135,54 @@ async fn public_dashboard_lists_tunnels_without_admin_fields() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn github_proxy_server_root_entry_and_subdomain_routing_are_separate() {
+    let workspace = workspace_root();
+    let server_port = free_port();
+    let target_port = free_port();
+    let test_dir = unique_test_dir("github-proxy-server");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let _target = start_target(target_port).await;
+    let server = TestServer::start_with_env(
+        &workspace,
+        &test_dir,
+        server_port,
+        &[(
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED",
+            "true".to_string(),
+        )],
+    )
+    .await;
+    server.setup().await;
+
+    let no_redirect_http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let response = no_redirect_http
+        .get(format!(
+            "http://127.0.0.1:{server_port}/gh?q=https://github.com/owner/repo/archive/main.zip"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers().get("location").unwrap(),
+        "/gh/https://github.com/owner/repo/archive/main.zip"
+    );
+
+    let _client = start_client(&workspace, server_port, target_port, "ghpath");
+    let http = reqwest::Client::new();
+    let response = wait_for_tunnel_get(&http, server_port, "ghpath", "/gh/hello").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("path=/gh/hello"));
+    assert!(body.contains("subdomain=ghpath"));
+}
+
 #[test]
 fn initial_schema_declares_request_log_and_session_indexes() {
     let schema = std::fs::read_to_string(workspace_root().join("schema/initial.sql"))
@@ -3534,7 +3582,7 @@ impl TestServer {
     async fn wait_for_health(&self) {
         let http = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/api/v1/health", self.port);
-        for _ in 0..120 {
+        for _ in 0..240 {
             if let Ok(response) = http.get(&url).send().await {
                 if response.status().is_success() {
                     return;

@@ -23,7 +23,14 @@ pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<
     let addr = config.addr;
     let pool = db::connect(&config.database_url).await?;
     let binary_sha256 = startup_binary_sha256().context("compute startup binary sha256")?;
-    let state = AppState::new(config_path, config, pool, Some(binary_sha256));
+    let github_proxy_route_prefix = routes::github_proxy_route_prefix(&config);
+    let state = AppState::new(
+        config_path,
+        config.clone(),
+        pool,
+        Some(binary_sha256),
+        github_proxy_route_prefix,
+    );
     state
         .initialize_tunnel_traffic_from_request_logs()
         .await
@@ -32,7 +39,7 @@ pub async fn serve(config_path: String, config: ServerConfig) -> anyhow::Result<
     routes::spawn_auto_upgrade_job(state.clone());
 
     let app = Router::new()
-        .merge(routes::router())
+        .merge(routes::router(&config))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(add_security_headers))
         .layer(TraceLayer::new_for_http())

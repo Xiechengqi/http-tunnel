@@ -64,7 +64,8 @@ pub async fn put_config(
         || current_cfg.domain != new_cfg.domain
         || current_cfg.public_scheme != new_cfg.public_scheme
         || current_cfg.database_url != new_cfg.database_url
-        || current_cfg.data_dir != new_cfg.data_dir;
+        || current_cfg.data_dir != new_cfg.data_dir
+        || current_cfg.github_proxy_server_path_prefix != new_cfg.github_proxy_server_path_prefix;
     *cfg = new_cfg;
     cfg.save(&state.config_path).map_err(AppError::internal)?;
     drop(cfg);
@@ -480,6 +481,19 @@ pub(crate) fn validate_server_config(cfg: &ServerConfig) -> Vec<String> {
     }
     if !cfg.github_proxy.trim().is_empty() && !valid_http_url(&cfg.github_proxy) {
         errors.push("github_proxy must start with http:// or https://".to_string());
+    }
+    if !valid_github_proxy_server_path_prefix(&cfg.github_proxy_server_path_prefix) {
+        errors.push(
+            "github_proxy_server_path_prefix must be an absolute non-reserved path such as /gh"
+                .to_string(),
+        );
+    }
+    if cfg.github_proxy_server_size_limit_bytes == 0 {
+        errors.push("github_proxy_server_size_limit_bytes must be greater than 0".to_string());
+    }
+    if cfg.github_proxy_server_request_timeout_seconds == 0 {
+        errors
+            .push("github_proxy_server_request_timeout_seconds must be greater than 0".to_string());
     }
     for reserved in &cfg.reserved_subdomains {
         if !valid_dns_label(reserved) {
@@ -910,6 +924,78 @@ pub(crate) fn config_schema_entries() -> Vec<ConfigFieldSchema> {
             "Optional proxy prefix used for GitHub release asset downloads.",
         ),
         schema(
+            "github_proxy_server_enabled",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_ENABLED",
+            false,
+            false,
+            "false",
+            "Expose this server as a public GitHub download proxy; requires direct GitHub access from the server.",
+        ),
+        schema(
+            "github_proxy_server_path_prefix",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_PATH_PREFIX",
+            false,
+            true,
+            "/gh",
+            "Root-domain path prefix for the public GitHub proxy route.",
+        ),
+        schema(
+            "github_proxy_server_size_limit_bytes",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_SIZE_LIMIT_BYTES",
+            false,
+            false,
+            "1072668082176",
+            "Maximum upstream Content-Length served through the GitHub proxy before redirecting to GitHub.",
+        ),
+        schema(
+            "github_proxy_server_jsdelivr",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_JSDELIVR",
+            false,
+            false,
+            "false",
+            "Redirect branch file requests to jsDelivr instead of proxying through this server.",
+        ),
+        schema(
+            "github_proxy_server_white_list",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_WHITE_LIST",
+            false,
+            false,
+            "",
+            "Optional owner/repo allow list for the public GitHub proxy.",
+        ),
+        schema(
+            "github_proxy_server_black_list",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_BLACK_LIST",
+            false,
+            false,
+            "",
+            "Optional owner/repo block list for the public GitHub proxy.",
+        ),
+        schema(
+            "github_proxy_server_pass_list",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_PASS_LIST",
+            false,
+            false,
+            "",
+            "Optional owner/repo list redirected away from local proxying.",
+        ),
+        schema(
+            "github_proxy_server_request_timeout_seconds",
+            "GitHub Proxy Server",
+            "HTTP_TUNNEL_GITHUB_PROXY_SERVER_REQUEST_TIMEOUT_SECONDS",
+            false,
+            false,
+            "300",
+            "Per-request upstream timeout for the public GitHub proxy.",
+        ),
+        schema(
             "auto_upgrade_enabled",
             "Upgrade",
             "HTTP_TUNNEL_AUTO_UPGRADE_ENABLED",
@@ -990,12 +1076,18 @@ fn config_field_metadata(key: &str) -> ConfigFieldMetadata {
         | "public_tunnel_create_enabled"
         | "allow_custom_subdomain"
         | "require_random_subdomain"
+        | "github_proxy_server_enabled"
+        | "github_proxy_server_jsdelivr"
         | "auto_upgrade_enabled" => {
             metadata.allowed_values = &["false", "true"];
             "bool"
         }
         "trusted_proxy_cidrs" => "cidr_list",
         "reserved_subdomains" => "dns_label_list",
+        "github_proxy_server_white_list"
+        | "github_proxy_server_black_list"
+        | "github_proxy_server_pass_list" => "owner_repo_rule_list",
+        "github_proxy_server_path_prefix" => "path_prefix",
         "duplicate_session_policy" => {
             metadata.allowed_values = &["replace", "reject"];
             "enum"
@@ -1033,7 +1125,9 @@ fn config_field_metadata(key: &str) -> ConfigFieldMetadata {
         | "session_retention_days"
         | "inspector_max_body_preview_bytes"
         | "admin_login_failure_limit"
-        | "admin_login_cooldown_seconds" => {
+        | "admin_login_cooldown_seconds"
+        | "github_proxy_server_size_limit_bytes"
+        | "github_proxy_server_request_timeout_seconds" => {
             metadata.min = Some(1);
             "integer"
         }
@@ -1111,6 +1205,38 @@ fn valid_http_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+fn valid_github_proxy_server_path_prefix(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty()
+        || value == "/"
+        || !value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("//")
+        || value.contains('*')
+        || value.contains(':')
+        || value.contains('?')
+        || value.contains('#')
+        || value.split('/').any(|part| part == "." || part == "..")
+    {
+        return false;
+    }
+    !reserved_path_prefix(value)
+}
+
+fn reserved_path_prefix(value: &str) -> bool {
+    [
+        "/admin",
+        "/api",
+        "/assets",
+        "/_next",
+        "/metrics",
+        "/icon.png",
+        "/icon.svg",
+    ]
+    .iter()
+    .any(|reserved| value == *reserved || value.starts_with(&format!("{reserved}/")))
+}
+
 fn valid_repo_part(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -1143,6 +1269,9 @@ mod tests {
             stale_session_seconds: 0,
             release_repo: "owner/repo/extra".to_string(),
             github_proxy: "ftp://bad.example.com".to_string(),
+            github_proxy_server_path_prefix: "/api".to_string(),
+            github_proxy_server_size_limit_bytes: 0,
+            github_proxy_server_request_timeout_seconds: 0,
             reserved_subdomains: vec!["Bad_Value".to_string()],
             ..ServerConfig::default()
         };
@@ -1170,6 +1299,15 @@ mod tests {
             .any(|error| error.contains("stale_session_seconds")));
         assert!(errors.iter().any(|error| error.contains("release_repo")));
         assert!(errors.iter().any(|error| error.contains("github_proxy")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("github_proxy_server_path_prefix")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("github_proxy_server_size_limit_bytes")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("github_proxy_server_request_timeout_seconds")));
         assert!(errors
             .iter()
             .any(|error| error.contains("reserved_subdomains")));
@@ -1210,6 +1348,31 @@ mod tests {
         assert!(!github_proxy.required);
         assert_eq!(github_proxy.default, "");
         assert!(github_proxy.hot_reloadable);
+
+        let github_proxy_server_enabled = schema
+            .iter()
+            .find(|field| field.key == "github_proxy_server_enabled")
+            .expect("github proxy server enabled schema");
+        assert_eq!(github_proxy_server_enabled.category, "GitHub Proxy Server");
+        assert_eq!(github_proxy_server_enabled.value_type, "bool");
+        assert!(github_proxy_server_enabled.hot_reloadable);
+
+        let github_proxy_server_path_prefix = schema
+            .iter()
+            .find(|field| field.key == "github_proxy_server_path_prefix")
+            .expect("github proxy server path prefix schema");
+        assert_eq!(github_proxy_server_path_prefix.value_type, "path_prefix");
+        assert_eq!(github_proxy_server_path_prefix.default, "/gh");
+        assert!(github_proxy_server_path_prefix.restart_required);
+
+        let github_proxy_server_white_list = schema
+            .iter()
+            .find(|field| field.key == "github_proxy_server_white_list")
+            .expect("github proxy server white list schema");
+        assert_eq!(
+            github_proxy_server_white_list.value_type,
+            "owner_repo_rule_list"
+        );
 
         let auto_upgrade = schema
             .iter()

@@ -48,6 +48,14 @@ Upgrade requirements:
 - The downloaded binary must pass `--help` before replacement.
 - The old binary is backed up as `<current_exe>.bak`.
 
+GitHub Proxy Server:
+
+- `github_proxy` and `github_proxy_server_*` are intentionally separate. `github_proxy` is only used by this server when it downloads upgrade assets through an external proxy.
+- `github_proxy_server_enabled = true` exposes a public root-domain GitHub proxy at `github_proxy_server_path_prefix`, default `/gh`.
+- Example public URL: `https://example.com/gh/https://github.com/owner/repo/releases/download/v1.0/app.tar.gz`.
+- This mode requires the server itself to reach GitHub directly. It does not help the server self-upgrade through GitHub when direct GitHub access is unavailable.
+- `github_proxy_server_path_prefix` changes require restart because routes are registered at startup. Other `github_proxy_server_*` behavior settings are hot-reloadable.
+
 Offline restore:
 
 ```bash

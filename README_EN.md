@@ -42,6 +42,7 @@ The supported runtime path is binary-only. The project focuses on reliable HTTP 
 - `/api/v1/health` is for liveness; `/api/v1/ready` checks setup completion and SQLite readiness.
 - Config, diagnostics, and audit paths share redaction for passwords, secrets, tokens, and hashes.
 - Upgrade resolves GitHub release assets, requires SHA256 checksum files, verifies downloads, probes `--help`, then replaces the server binary.
+- Optional root-domain GitHub Proxy Server exposes GitHub downloads and raw files through `https://<domain>/gh/...`, with allow/deny rules, pass-through redirects, and optional jsDelivr raw-file rewriting.
 
 ## Quick Start
 
@@ -157,6 +158,25 @@ By default, server config, the SQLite database, and local data files live in `$H
 | Security | `public_tunnel_create_enabled`, `tunnel_create_bearer_token_hash`, `metrics_public`, `metrics_bearer_token_hash`, `turnstile_secret` |
 | Log maintenance | `request_log_retention_days`, `event_retention_days`, `session_retention_days`, `cleanup_interval_seconds` |
 | Upgrade/restart | `release_repo`, `release_tag`, `github_proxy`, `auto_upgrade_enabled`, `systemd_unit` |
+| GitHub Proxy Server | `github_proxy_server_enabled`, `github_proxy_server_path_prefix`, `github_proxy_server_size_limit_bytes`, `github_proxy_server_request_timeout_seconds`, `github_proxy_server_jsdelivr`, `github_proxy_server_white_list`, `github_proxy_server_black_list`, `github_proxy_server_pass_list` |
+
+`github_proxy` is only an external proxy prefix for server self-upgrade downloads. `github_proxy_server_*` exposes this server as a root-domain GitHub proxy for external users, is disabled by default, and requires the server itself to reach GitHub directly.
+
+### GitHub Proxy Server
+
+When `github_proxy_server_enabled = true`, the server exposes a root-domain GitHub proxy. The default entrypoint is `/gh`:
+
+```text
+https://example.com/gh/https://github.com/owner/repo/releases/download/v1.0/app.tar.gz
+https://example.com/gh/github.com/owner/repo/archive/refs/heads/main.zip
+https://example.com/gh/raw.githubusercontent.com/owner/repo/main/file.txt
+```
+
+`/gh?q=https://github.com/...` redirects to the canonical `/gh/<target>` path. This feature only handles root-domain requests such as `example.com` or `www.example.com`; `/gh/...` on a tunnel subdomain still goes through normal tunnel proxy routing. `github_proxy_server_path_prefix` defaults to `/gh`, cannot use reserved prefixes such as `/api`, `/admin`, `/metrics`, or `/_next`, and requires a server restart after changes.
+
+Supported upstreams include GitHub releases/archives, `github.com/<owner>/<repo>/blob|raw/...`, Git smart HTTP services, `raw.githubusercontent.com` files, and gist raw files. `github_proxy_server_white_list`, `github_proxy_server_black_list`, and `github_proxy_server_pass_list` accept `owner`, `owner/repo`, or `*/repo` rules. A configured allow list must match, deny-list matches are rejected, and pass-list matches redirect directly to the upstream instead of proxying through the server. When `github_proxy_server_jsdelivr = true`, raw/blob files redirect to jsDelivr.
+
+This is a public GitHub Proxy Server capability and is separate from http-tunnel self-upgrade. If the server host cannot reach GitHub directly, keep configuring `github_proxy` with an external GitHub proxy for self-upgrade downloads.
 
 ## Documentation
 

@@ -46,6 +46,7 @@ https://<subdomain>.<domain>
 - `/api/v1/health` 用于存活检查，`/api/v1/ready` 用于 setup 完成和 SQLite 可用性检查。
 - 配置、诊断和审计路径统一遮蔽密码、secret、token 和 hash 等敏感信息。
 - 升级流程解析 GitHub release 资产，要求 SHA256 校验文件，下载后先校验再执行 `--help` 探测和二进制替换。
+- 可选根域路径 GitHub Proxy Server，通过 `https://<domain>/gh/...` 对外代理 GitHub 下载和 raw 文件，支持白名单、黑名单、直连旁路和 jsDelivr raw 文件重写。
 
 ## 快速开始
 
@@ -161,6 +162,25 @@ cargo test -p http-tunnel-server --test e2e_http \
 | 安全 | `public_tunnel_create_enabled`、`tunnel_create_bearer_token_hash`、`metrics_public`、`metrics_bearer_token_hash`、`turnstile_secret` |
 | 日志维护 | `request_log_retention_days`、`event_retention_days`、`session_retention_days`、`cleanup_interval_seconds` |
 | 升级重启 | `release_repo`、`release_tag`、`github_proxy`、`auto_upgrade_enabled`、`systemd_unit` |
+| GitHub Proxy Server | `github_proxy_server_enabled`、`github_proxy_server_path_prefix`、`github_proxy_server_size_limit_bytes`、`github_proxy_server_request_timeout_seconds`、`github_proxy_server_jsdelivr`、`github_proxy_server_white_list`、`github_proxy_server_black_list`、`github_proxy_server_pass_list` |
+
+`github_proxy` 只用于 server 自升级下载时借用外部 GitHub 代理；`github_proxy_server_*` 是本 server 对外提供根域路径 GitHub 代理能力，默认关闭，开启后要求 server 自身能直连 GitHub。
+
+### GitHub Proxy Server
+
+开启 `github_proxy_server_enabled = true` 后，server 会在根域路径上提供 GitHub 代理，默认入口是 `/gh`：
+
+```text
+https://example.com/gh/https://github.com/owner/repo/releases/download/v1.0/app.tar.gz
+https://example.com/gh/github.com/owner/repo/archive/refs/heads/main.zip
+https://example.com/gh/raw.githubusercontent.com/owner/repo/main/file.txt
+```
+
+`/gh?q=https://github.com/...` 会重定向到规范的 `/gh/<target>` 路径。该能力只处理根域 `example.com` 或 `www.example.com` 请求；子域名上的 `/gh/...` 仍按普通 tunnel 代理转发，避免和业务隧道路由混淆。`github_proxy_server_path_prefix` 默认为 `/gh`，不能使用 `/api`、`/admin`、`/metrics`、`/_next` 等保留路径，修改后需要重启 server。
+
+支持的上游包括 GitHub release/archive、`github.com/<owner>/<repo>/blob|raw/...`、Git smart HTTP service、`raw.githubusercontent.com` 文件和 gist raw 文件。`github_proxy_server_white_list`、`github_proxy_server_black_list`、`github_proxy_server_pass_list` 使用 `owner`、`owner/repo` 或 `*/repo` 规则；白名单存在时必须命中，黑名单命中时拒绝，pass list 命中时直接重定向到上游而不经 server 代理。开启 `github_proxy_server_jsdelivr = true` 时，raw/blob 文件会重定向到 jsDelivr。
+
+这项功能是对外提供 GitHub Proxy Server 能力，不参与 http-tunnel 自升级。若 server 所在环境无法直连 GitHub，需要继续通过 `github_proxy` 配置一个外部 GitHub 代理供自升级下载使用。
 
 ## 文档
 

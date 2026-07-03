@@ -1,10 +1,12 @@
 use crate::state::AppState;
 use axum::{
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
+use http_tunnel_common::ServerConfig;
 
 mod admin;
+mod github_proxy;
 mod health;
 mod metrics;
 mod proxy;
@@ -13,9 +15,19 @@ mod tunnels;
 
 pub(crate) use admin::{spawn_auto_upgrade_job, startup_binary_sha256};
 
-pub fn router() -> Router<AppState> {
+pub(crate) fn github_proxy_route_prefix(config: &ServerConfig) -> String {
+    github_proxy::route_prefix(config)
+}
+
+pub fn router(config: &ServerConfig) -> Router<AppState> {
+    let github_proxy_prefix = github_proxy::route_prefix(config);
     Router::new()
         .route("/", get(proxy::root))
+        .route(&github_proxy_prefix, get(github_proxy::entry))
+        .route(
+            &format!("{github_proxy_prefix}/*target"),
+            any(github_proxy::proxy),
+        )
         .route("/admin", get(proxy::admin))
         .route("/admin/setup", get(proxy::setup_page))
         .route("/admin/login", get(proxy::login_page))
