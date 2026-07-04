@@ -136,6 +136,61 @@ async fn public_dashboard_lists_tunnels_without_admin_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn public_network_snapshot_lists_lightweight_tunnel_traffic() {
+    let workspace = workspace_root();
+    let server_port = free_port();
+    let test_dir = unique_test_dir("public-network");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let server = TestServer::start(&workspace, &test_dir, server_port).await;
+    server.setup().await;
+    let http = reqwest::Client::new();
+    let _ = create_tunnel(&http, server_port, "networkdash").await;
+
+    let response: Value = http
+        .get(format!("http://127.0.0.1:{server_port}/api/v1/network"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["ok"], true);
+    let data = &response["data"];
+    assert!(data["generated_at_unix_ms"].as_u64().unwrap() > 0);
+    assert_eq!(data["active_sessions"], 0);
+    assert_eq!(data["active_streams"], 0);
+    assert_eq!(data["total_bytes_in"], 0);
+    assert_eq!(data["total_bytes_out"], 0);
+    let tunnel = data["tunnels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tunnel| tunnel["subdomain"] == "networkdash")
+        .expect("network snapshot should list created tunnel");
+    assert_eq!(tunnel["connected"], false);
+    assert_eq!(tunnel["active_sessions"], 0);
+    assert_eq!(tunnel["active_streams"], 0);
+    assert_eq!(tunnel["bytes_in"], 0);
+    assert_eq!(tunnel["bytes_out"], 0);
+
+    let raw = serde_json::to_string(data).unwrap();
+    for forbidden in [
+        "access_policy",
+        "access_token",
+        "client_ip",
+        "remote_ip",
+        "token_hash",
+        "database",
+    ] {
+        assert!(
+            !raw.contains(forbidden),
+            "leaked public network field {forbidden}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn github_proxy_server_root_entry_and_subdomain_routing_are_separate() {
     let workspace = workspace_root();
     let server_port = free_port();

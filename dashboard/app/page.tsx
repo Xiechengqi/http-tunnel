@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import {
+  Activity,
   ArrowDown,
   ArrowUp,
   BookOpen,
@@ -22,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { publicApi } from "@/lib/api";
-import type { DashboardPresence, DashboardSummary, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
+import type { DashboardPresence, DashboardSummary, NetworkSnapshot, NetworkTunnelSnapshot, PublicTunnel, PublicTunnelCountrySource } from "@/lib/types";
 import { cn, formatBytes, formatBytesPerSecond, formatNumber } from "@/lib/utils";
 
 type StatusFilter = "all" | "online" | "offline";
@@ -35,13 +36,23 @@ type TrafficSnapshot = {
   bytesOut: number;
   capturedAt: number;
 };
+type NetworkHistoryPoint = TrafficRate & {
+  capturedAt: number;
+  totalBytesPerSecond: number;
+};
+type NetworkTunnelRate = TrafficRate & {
+  subdomain: string;
+  connected: boolean;
+  activeStreams: number;
+  totalBytesPerSecond: number;
+};
 
 const COUNTRY_NAMES = new Map(regions.map((region) => [region.code.toUpperCase(), region.name]));
-const DEFAULT_MAP_OFFSET_RATIO = 0.58;
-const MAP_OFFSET_STORAGE_KEY = "http-tunnel.dashboard.mapOffsetRatio.v1";
 const DISCONNECTED_EXPIRE_MS = 10 * 60 * 1000;
 const EXPIRED_DELETE_MS = 60 * 60 * 1000;
 const EMPTY_TRAFFIC_RATE: TrafficRate = { inBytesPerSecond: 0, outBytesPerSecond: 0 };
+const NETWORK_HISTORY_LIMIT = 60;
+const WORLD_MAP_HEIGHT_RATIO = 0.62;
 
 export default function PublicDashboardPage() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -141,22 +152,25 @@ export default function PublicDashboardPage() {
               <MetricCard label="errors" value={formatNumber(summary.stats.error_count)} tone={summary.stats.error_count ? "red" : "muted"} />
             </section>
 
-            <Card className="overflow-hidden">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <MapPinned className="h-4 w-4 text-primary" />
-                  Source map
-                </CardTitle>
-                <Badge variant="muted">{formatNumber(visibleCountrySources.length)} countries</Badge>
-              </CardHeader>
-              <CardContent className="p-0">
-                <TunnelSourceMap
-                  countries={visibleCountrySources}
-                  totalTunnels={visibleOnlineTunnelCount}
-                  unknownTunnels={visibleUnknownTunnelCount}
-                />
-              </CardContent>
-            </Card>
+            <section className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <MapPinned className="h-4 w-4 text-primary" />
+                    Source map
+                  </CardTitle>
+                  <Badge variant="muted">{formatNumber(visibleCountrySources.length)} countries</Badge>
+                </CardHeader>
+                <CardContent className="p-0">
+                  <TunnelSourceMap
+                    countries={visibleCountrySources}
+                    totalTunnels={visibleOnlineTunnelCount}
+                    unknownTunnels={visibleUnknownTunnelCount}
+                  />
+                </CardContent>
+              </Card>
+              <RealtimeTrafficPanel />
+            </section>
 
             <Card>
               <CardHeader className="items-start gap-3 md:flex-row md:items-center">
@@ -380,6 +394,166 @@ function CommandBlock({ title, command }: { title: string; command: string }) {
   );
 }
 
+function RealtimeTrafficPanel() {
+  const [snapshot, setSnapshot] = useState<NetworkSnapshot | null>(null);
+  const [history, setHistory] = useState<NetworkHistoryPoint[]>([]);
+  const [tunnelRates, setTunnelRates] = useState<NetworkTunnelRate[]>([]);
+  const [error, setError] = useState("");
+  const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
+  const previousSnapshotRef = useRef<NetworkSnapshot | null>(null);
+  const sessionStartBytesRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const next = await publicApi<NetworkSnapshot>("/api/v1/network");
+        if (cancelled) return;
+
+        const previous = previousSnapshotRef.current;
+        const sample = networkHistoryPoint(previous, next);
+        const rates = networkTunnelRates(previous, next);
+        previousSnapshotRef.current = next;
+        sessionStartBytesRef.current ??= totalNetworkBytes(next);
+        setSnapshot(next);
+        setTunnelRates(rates);
+        setHistory((current) => [...current, sample].slice(-NETWORK_HISTORY_LIMIT));
+        setLastLoadedAt(new Date(next.generated_at_unix_ms));
+        setError("");
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    load();
+    const timer = window.setInterval(load, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const current = history.at(-1);
+  const peak = history.reduce((max, point) => Math.max(max, point.totalBytesPerSecond), 0);
+  const average = history.length
+    ? history.reduce((total, point) => total + point.totalBytesPerSecond, 0) / history.length
+    : 0;
+  const sessionTraffic = snapshot
+    ? Math.max(0, totalNetworkBytes(snapshot) - (sessionStartBytesRef.current ?? totalNetworkBytes(snapshot)))
+    : 0;
+  const topTunnels = tunnelRates
+    .filter((tunnel) => tunnel.connected || tunnel.totalBytesPerSecond > 0)
+    .sort((left, right) => right.totalBytesPerSecond - left.totalBytesPerSecond || left.subdomain.localeCompare(right.subdomain))
+    .slice(0, 3);
+
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader>
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            Realtime traffic
+          </CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {lastLoadedAt ? `refreshed ${formatClock(lastLoadedAt)}` : "Collecting first sample"}
+          </p>
+        </div>
+        <Badge variant={error ? "danger" : "healthy"}>{error ? "error" : "live"}</Badge>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {error ? <ErrorState message={error} /> : null}
+        <div className="grid grid-cols-2 gap-2">
+          <TrafficMetric label="current" value={formatBytesPerSecond(current?.totalBytesPerSecond)} />
+          <TrafficMetric label="60s avg" value={formatBytesPerSecond(average)} />
+          <TrafficMetric label="60s peak" value={formatBytesPerSecond(peak)} />
+          <TrafficMetric label="session" value={formatBytes(sessionTraffic)} />
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <ArrowDown className="h-3.5 w-3.5" />
+              In
+            </span>
+            <span className="font-medium">{formatBytesPerSecond(current?.inBytesPerSecond)}</span>
+          </div>
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <ArrowUp className="h-3.5 w-3.5" />
+              Out
+            </span>
+            <span className="font-medium">{formatBytesPerSecond(current?.outBytesPerSecond)}</span>
+          </div>
+        </div>
+        <TrafficSparkline points={history} />
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Top tunnels</span>
+            <span>
+              {formatNumber(snapshot?.active_sessions || 0)} sessions / {formatNumber(snapshot?.active_streams || 0)} streams
+            </span>
+          </div>
+          {topTunnels.length ? (
+            <div className="grid gap-2">
+              {topTunnels.map((tunnel) => (
+                <div key={tunnel.subdomain} className="grid gap-1 rounded-md border border-border px-3 py-2">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <span className="min-w-0 truncate font-medium">{tunnel.subdomain}</span>
+                    <span className="shrink-0 font-mono text-xs">{formatBytesPerSecond(tunnel.totalBytesPerSecond)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      {formatBytesPerSecond(tunnel.inBytesPerSecond)} in / {formatBytesPerSecond(tunnel.outBytesPerSecond)} out
+                    </span>
+                    <span>{formatNumber(tunnel.activeStreams)} streams</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState label={snapshot ? "No active traffic" : "Collecting first sample"} />
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TrafficMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-secondary/30 px-3 py-2">
+      <div className="text-[11px] uppercase tracking-[0.08em] text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate font-mono text-sm font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function TrafficSparkline({ points }: { points: NetworkHistoryPoint[] }) {
+  const width = 320;
+  const height = 116;
+  const padding = 8;
+  const maxValue = Math.max(1, ...points.map((point) => point.totalBytesPerSecond));
+  const totalLine = sparklinePath(points, (point) => point.totalBytesPerSecond, width, height, padding, maxValue);
+  const inLine = sparklinePath(points, (point) => point.inBytesPerSecond, width, height, padding, maxValue);
+  const outLine = sparklinePath(points, (point) => point.outBytesPerSecond, width, height, padding, maxValue);
+  const area = sparklineAreaPath(points, (point) => point.totalBytesPerSecond, width, height, padding, maxValue);
+
+  return (
+    <div className="h-36 rounded-md border border-border bg-background p-3">
+      {points.length < 2 ? (
+        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Collecting first sample</div>
+      ) : (
+        <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" role="img" aria-label="Realtime traffic trend">
+          <path d={area} fill="rgba(10, 148, 242, 0.14)" />
+          <path d={totalLine} fill="none" stroke="#0A94F2" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={inLine} fill="none" stroke="#16A34A" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={outLine} fill="none" stroke="#F59E0B" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        </svg>
+      )}
+    </div>
+  );
+}
+
 function TunnelSourceMap({
   countries,
   totalTunnels,
@@ -391,10 +565,7 @@ function TunnelSourceMap({
 }) {
   const mapRootRef = useRef<HTMLDivElement | null>(null);
   const [mapFrameRef, mapFrameSize] = useElementSize<HTMLDivElement>();
-  const dragRef = useRef<MapDragState | null>(null);
-  const mapOffsetRatioRef = useRef(DEFAULT_MAP_OFFSET_RATIO);
   const [tooltip, setTooltip] = useState<MapTooltipState | null>(null);
-  const [mapOffsetRatio, setMapOffsetRatioValue] = useState(DEFAULT_MAP_OFFSET_RATIO);
   const countryMeta = useMemo(
     () => new Map(countries.map((country) => [country.country_code.toUpperCase(), country])),
     [countries],
@@ -409,23 +580,11 @@ function TunnelSourceMap({
   );
   const maxTunnels = countries.reduce((max, country) => Math.max(max, country.tunnel_count), 0);
   const mapFrameWidth = mapFrameSize.width;
-  const mapSize = Math.max(640, Math.ceil(mapFrameWidth || 960));
-  const mapVisualHeight = mapSize * 0.75;
-  const maxMapOffsetY = Math.max(0, (mapVisualHeight - mapFrameSize.height) / 2);
-  const mapOffsetY = maxMapOffsetY > 0 ? mapOffsetRatio * maxMapOffsetY : 0;
-
-  useEffect(() => {
-    const storedRatio = readStoredMapOffsetRatio();
-    if (storedRatio === null) return;
-    mapOffsetRatioRef.current = storedRatio;
-    setMapOffsetRatioValue(storedRatio);
-  }, []);
-
-  function setMapOffsetRatio(nextRatio: number) {
-    const clampedRatio = clamp(nextRatio, -1, 1);
-    mapOffsetRatioRef.current = clampedRatio;
-    setMapOffsetRatioValue(clampedRatio);
-  }
+  const mapFrameHeight = mapFrameSize.height;
+  const mapSize = Math.max(
+    260,
+    Math.floor(Math.min(mapFrameWidth || 760, (mapFrameHeight || 420) / WORLD_MAP_HEIGHT_RATIO)),
+  );
 
   function showTooltip(event: PointerEvent<HTMLDivElement>) {
     const root = mapRootRef.current;
@@ -460,53 +619,15 @@ function TunnelSourceMap({
     });
   }
 
-  function startMapDrag(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    dragRef.current = {
-      pointerId: event.pointerId,
-      startY: event.clientY,
-      startOffsetY: mapOffsetY,
-    };
-    setTooltip(null);
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function moveMapPointer(event: PointerEvent<HTMLDivElement>) {
-    const drag = dragRef.current;
-    if (drag?.pointerId === event.pointerId) {
-      const nextOffset = clamp(drag.startOffsetY + event.clientY - drag.startY, -maxMapOffsetY, maxMapOffsetY);
-      setMapOffsetRatio(maxMapOffsetY > 0 ? nextOffset / maxMapOffsetY : 0);
-      setTooltip(null);
-      event.preventDefault();
-      return;
-    }
-    showTooltip(event);
-  }
-
-  function stopMapDrag(event: PointerEvent<HTMLDivElement>) {
-    if (dragRef.current?.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    writeStoredMapOffsetRatio(mapOffsetRatioRef.current);
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-  }
-
   return (
     <div
       ref={mapRootRef}
-      className="relative h-[clamp(160px,24vw,310px)] touch-none overflow-hidden border-t border-border bg-sky-50 select-none dark:bg-[#07111f]"
-      onPointerDown={startMapDrag}
-      onPointerMove={moveMapPointer}
-      onPointerUp={stopMapDrag}
-      onPointerCancel={stopMapDrag}
-      onLostPointerCapture={stopMapDrag}
-      onPointerLeave={(event) => {
-        if (dragRef.current?.pointerId !== event.pointerId) setTooltip(null);
-      }}
+      className="relative h-[clamp(280px,34vw,460px)] overflow-hidden border-t border-border bg-sky-50 dark:bg-[#07111f]"
+      onPointerMove={showTooltip}
+      onPointerLeave={() => setTooltip(null)}
     >
       <div ref={mapFrameRef} className="absolute inset-x-0 bottom-9 top-0 flex items-center justify-center overflow-hidden px-2 md:bottom-10">
-        <div className="cursor-grab active:cursor-grabbing" style={{ transform: `translateY(${mapOffsetY}px)` }}>
+        <div>
           <WorldMap
             data={data}
             color="#0A94F2"
@@ -564,12 +685,6 @@ type MapTooltipState = {
   y: number;
 };
 
-type MapDragState = {
-  pointerId: number;
-  startY: number;
-  startOffsetY: number;
-};
-
 function useElementSize<T extends HTMLElement>() {
   const ref = useRef<T | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -612,31 +727,6 @@ function useElementSize<T extends HTMLElement>() {
   return [ref, size] as const;
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function readStoredMapOffsetRatio() {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(MAP_OFFSET_STORAGE_KEY);
-    if (!raw) return null;
-    const value = Number(raw);
-    return Number.isFinite(value) ? clamp(value, -1, 1) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredMapOffsetRatio(value: number) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(MAP_OFFSET_STORAGE_KEY, String(clamp(value, -1, 1)));
-  } catch {
-    // Private browsing or locked-down storage should not break the dashboard.
-  }
-}
-
 function countryStyle(context: CountryContext<number>, maxTunnels: number) {
   const value = Number(context.countryValue || 0);
   if (!value || !maxTunnels) {
@@ -644,7 +734,7 @@ function countryStyle(context: CountryContext<number>, maxTunnels: number) {
       fill: "rgba(186, 230, 253, 0.34)",
       stroke: "rgba(14, 116, 144, 0.22)",
       strokeWidth: 0.6,
-      cursor: "grab",
+      cursor: "pointer",
     };
   }
   const intensity = Math.max(0.22, Math.min(1, value / maxTunnels));
@@ -652,8 +742,112 @@ function countryStyle(context: CountryContext<number>, maxTunnels: number) {
     fill: `rgba(10, 148, 242, ${0.28 + intensity * 0.62})`,
     stroke: "rgba(7, 89, 133, 0.42)",
     strokeWidth: 0.8,
-    cursor: "grab",
+    cursor: "pointer",
   };
+}
+
+function networkHistoryPoint(previous: NetworkSnapshot | null, next: NetworkSnapshot): NetworkHistoryPoint {
+  if (!previous) {
+    return {
+      capturedAt: next.generated_at_unix_ms,
+      inBytesPerSecond: 0,
+      outBytesPerSecond: 0,
+      totalBytesPerSecond: 0,
+    };
+  }
+  const elapsedSeconds = Math.max((next.generated_at_unix_ms - previous.generated_at_unix_ms) / 1000, 1);
+  const inBytesPerSecond = bytesPerSecond(previous.total_bytes_in, next.total_bytes_in, elapsedSeconds);
+  const outBytesPerSecond = bytesPerSecond(previous.total_bytes_out, next.total_bytes_out, elapsedSeconds);
+  return {
+    capturedAt: next.generated_at_unix_ms,
+    inBytesPerSecond,
+    outBytesPerSecond,
+    totalBytesPerSecond: inBytesPerSecond + outBytesPerSecond,
+  };
+}
+
+function networkTunnelRates(previous: NetworkSnapshot | null, next: NetworkSnapshot): NetworkTunnelRate[] {
+  const previousTunnels = new Map((previous?.tunnels || []).map((tunnel) => [tunnel.subdomain, tunnel]));
+  const elapsedSeconds = previous
+    ? Math.max((next.generated_at_unix_ms - previous.generated_at_unix_ms) / 1000, 1)
+    : 1;
+  return next.tunnels.map((tunnel) => {
+    const previousTunnel = previousTunnels.get(tunnel.subdomain);
+    const inBytesPerSecond = previousTunnel ? tunnelBytesPerSecond(previousTunnel, tunnel, "bytes_in", elapsedSeconds) : 0;
+    const outBytesPerSecond = previousTunnel ? tunnelBytesPerSecond(previousTunnel, tunnel, "bytes_out", elapsedSeconds) : 0;
+    return {
+      subdomain: tunnel.subdomain,
+      connected: tunnel.connected,
+      activeStreams: tunnel.active_streams,
+      inBytesPerSecond,
+      outBytesPerSecond,
+      totalBytesPerSecond: inBytesPerSecond + outBytesPerSecond,
+    };
+  });
+}
+
+function tunnelBytesPerSecond(
+  previous: NetworkTunnelSnapshot,
+  next: NetworkTunnelSnapshot,
+  field: "bytes_in" | "bytes_out",
+  elapsedSeconds: number,
+) {
+  return bytesPerSecond(previous[field], next[field], elapsedSeconds);
+}
+
+function bytesPerSecond(previousBytes: number, nextBytes: number, elapsedSeconds: number) {
+  return Math.max(0, safeTrafficBytes(nextBytes) - safeTrafficBytes(previousBytes)) / elapsedSeconds;
+}
+
+function totalNetworkBytes(snapshot: NetworkSnapshot) {
+  return safeTrafficBytes(snapshot.total_bytes_in) + safeTrafficBytes(snapshot.total_bytes_out);
+}
+
+function sparklinePath(
+  points: NetworkHistoryPoint[],
+  value: (point: NetworkHistoryPoint) => number,
+  width: number,
+  height: number,
+  padding: number,
+  maxValue: number,
+) {
+  return sparklineCoordinates(points, value, width, height, padding, maxValue)
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+    .join(" ");
+}
+
+function sparklineAreaPath(
+  points: NetworkHistoryPoint[],
+  value: (point: NetworkHistoryPoint) => number,
+  width: number,
+  height: number,
+  padding: number,
+  maxValue: number,
+) {
+  const coordinates = sparklineCoordinates(points, value, width, height, padding, maxValue);
+  if (coordinates.length < 2) return "";
+  const bottom = height - padding;
+  const first = coordinates[0];
+  const last = coordinates[coordinates.length - 1];
+  const line = coordinates.map((point) => `L ${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(" ");
+  return `M ${first.x.toFixed(2)} ${bottom} ${line} L ${last.x.toFixed(2)} ${bottom} Z`;
+}
+
+function sparklineCoordinates(
+  points: NetworkHistoryPoint[],
+  value: (point: NetworkHistoryPoint) => number,
+  width: number,
+  height: number,
+  padding: number,
+  maxValue: number,
+) {
+  const innerWidth = width - padding * 2;
+  const innerHeight = height - padding * 2;
+  const lastIndex = Math.max(points.length - 1, 1);
+  return points.map((point, index) => ({
+    x: padding + (index / lastIndex) * innerWidth,
+    y: height - padding - (Math.max(0, value(point)) / maxValue) * innerHeight,
+  }));
 }
 
 function TunnelTable({

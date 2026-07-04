@@ -54,6 +54,26 @@ pub struct DashboardPresence {
     pub online_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct NetworkSnapshot {
+    pub generated_at_unix_ms: u64,
+    pub active_sessions: usize,
+    pub active_streams: usize,
+    pub total_bytes_in: u64,
+    pub total_bytes_out: u64,
+    pub tunnels: Vec<NetworkTunnelSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkTunnelSnapshot {
+    pub subdomain: String,
+    pub connected: bool,
+    pub active_sessions: usize,
+    pub active_streams: usize,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
 #[derive(Debug, Serialize, Default)]
 pub struct DashboardStats {
     pub total_tunnels: usize,
@@ -147,6 +167,62 @@ pub async fn dashboard_presence(
 ) -> Result<Json<ApiResponse<DashboardPresence>>> {
     let online_count = record_dashboard_presence(&state.pool, &input.session_id).await?;
     Ok(Json(ApiResponse::ok(DashboardPresence { online_count })))
+}
+
+pub async fn network(State(state): State<AppState>) -> Json<ApiResponse<NetworkSnapshot>> {
+    let runtime = runtime_tunnel_metrics(&state).await;
+    let traffic_snapshots = state.tunnel_traffic_snapshots().await;
+    let rows = sqlx::query(
+        "SELECT t.id, t.subdomain \
+         FROM tunnels t \
+         WHERE t.status != 'deleted' \
+         ORDER BY t.subdomain ASC \
+         LIMIT ?1",
+    )
+    .bind(MAX_PUBLIC_TUNNELS)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut total_bytes_in = 0_u64;
+    let mut total_bytes_out = 0_u64;
+    let mut active_sessions = 0_usize;
+    let mut active_streams = 0_usize;
+    let tunnels = rows
+        .into_iter()
+        .map(|row| {
+            let id = row.get::<String, _>("id");
+            let traffic = traffic_snapshots.get(&id).copied().unwrap_or_default();
+            let runtime_metrics = runtime.get(&id);
+            let tunnel_active_sessions = runtime_metrics
+                .map(|metrics| metrics.active_sessions)
+                .unwrap_or_default();
+            let tunnel_active_streams = runtime_metrics
+                .map(|metrics| metrics.active_streams)
+                .unwrap_or_default();
+            active_sessions += tunnel_active_sessions;
+            active_streams += tunnel_active_streams;
+            total_bytes_in = total_bytes_in.saturating_add(traffic.bytes_in);
+            total_bytes_out = total_bytes_out.saturating_add(traffic.bytes_out);
+            NetworkTunnelSnapshot {
+                subdomain: row.get::<String, _>("subdomain"),
+                connected: tunnel_active_sessions > 0,
+                active_sessions: tunnel_active_sessions,
+                active_streams: tunnel_active_streams,
+                bytes_in: traffic.bytes_in,
+                bytes_out: traffic.bytes_out,
+            }
+        })
+        .collect();
+
+    Json(ApiResponse::ok(NetworkSnapshot {
+        generated_at_unix_ms: unix_now_millis(),
+        active_sessions,
+        active_streams,
+        total_bytes_in,
+        total_bytes_out,
+        tunnels,
+    }))
 }
 
 fn dashboard_server_url(cfg: &http_tunnel_common::ServerConfig) -> Option<String> {
@@ -510,6 +586,13 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn unix_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
 }
 

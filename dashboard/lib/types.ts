@@ -69,6 +69,24 @@ export type DashboardPresence = {
   online_count: number;
 };
 
+export type NetworkSnapshot = {
+  generated_at_unix_ms: number;
+  active_sessions: number;
+  active_streams: number;
+  total_bytes_in: number;
+  total_bytes_out: number;
+  tunnels: NetworkTunnelSnapshot[];
+};
+
+export type NetworkTunnelSnapshot = {
+  subdomain: string;
+  connected: boolean;
+  active_sessions: number;
+  active_streams: number;
+  bytes_in: number;
+  bytes_out: number;
+};
+
 export type AdminStatus = {
   setup_required: boolean;
   pending_restart: boolean;

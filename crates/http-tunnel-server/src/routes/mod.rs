@@ -39,6 +39,7 @@ pub fn router(config: &ServerConfig) -> Router<AppState> {
         .route("/api/v1/ready", get(health::ready))
         .route("/api/v1/version", get(health::version))
         .route("/api/v1/dashboard", get(health::dashboard))
+        .route("/api/v1/network", get(health::network))
         .route(
             "/api/v1/dashboard/presence",
             post(health::dashboard_presence),
