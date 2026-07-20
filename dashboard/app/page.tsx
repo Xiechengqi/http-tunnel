@@ -5,12 +5,14 @@ import {
   Activity,
   ArrowDown,
   ArrowUp,
+  BarChart3,
   BookOpen,
   ExternalLink,
   Globe2,
   MapPinned,
   Network,
   Search,
+  Wifi,
   X,
 } from "lucide-react";
 import WorldMap, { regions, type CountryContext, type DataItem } from "react-svg-worldmap";
@@ -43,7 +45,6 @@ type NetworkHistoryPoint = TrafficRate & {
 type NetworkTunnelRate = TrafficRate & {
   subdomain: string;
   connected: boolean;
-  activeStreams: number;
   totalBytesPerSecond: number;
 };
 
@@ -129,6 +130,12 @@ export default function PublicDashboardPage() {
         ? "Database unavailable"
         : undefined;
   const statusTone: "warning" | "danger" = error || (summary?.ready === "not_ready" && !summary.setup_required) ? "danger" : "warning";
+  const onlinePercent = summary?.stats.total_tunnels
+    ? (summary.stats.online_tunnels / summary.stats.total_tunnels) * 100
+    : 0;
+  const errorPercent = summary?.stats.request_count
+    ? (summary.stats.error_count / summary.stats.request_count) * 100
+    : 0;
 
   return (
     <div className="ops-shell">
@@ -138,30 +145,58 @@ export default function PublicDashboardPage() {
         status={status}
         statusTone={statusTone}
       />
-      <main className="mx-auto grid max-w-7xl gap-5 px-4 py-5">
+      <main className="mx-auto grid w-full min-w-0 max-w-7xl gap-5 px-4 py-5">
         {error ? <ErrorState message={error} /> : null}
         {!summary && !error ? <LoadingState label="Loading tunnels" /> : null}
         {summary ? (
           <>
-            <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-              <MetricCard label="tunnels" value={formatNumber(summary.stats.total_tunnels)} tone="blue" />
-              <MetricCard label="online" value={formatNumber(summary.stats.online_tunnels)} tone="green" />
-              <MetricCard label="offline" value={formatNumber(summary.stats.offline_tunnels)} tone={summary.stats.offline_tunnels ? "amber" : "muted"} />
-              <MetricCard label="countries" value={formatNumber(summary.country_sources.length)} tone="blue" />
-              <MetricCard label="requests" value={formatNumber(summary.stats.request_count)} tone="blue" />
-              <MetricCard label="errors" value={formatNumber(summary.stats.error_count)} tone={summary.stats.error_count ? "red" : "muted"} />
+            <section className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4">
+              <MetricCard
+                label="Tunnel health"
+                value={`${formatNumber(summary.stats.online_tunnels)} / ${formatNumber(summary.stats.total_tunnels)}`}
+                detail={`${formatNumber(summary.stats.offline_tunnels)} offline · ${formatPercent(onlinePercent)} online`}
+                icon={<Activity className="h-4 w-4" />}
+                progress={onlinePercent}
+                tone={summary.stats.offline_tunnels ? "amber" : "green"}
+              />
+              <MetricCard
+                label="Live connections"
+                value={formatNumber(summary.stats.active_sessions)}
+                detail={`${formatNumber(summary.stats.active_streams)} active streams`}
+                icon={<Wifi className="h-4 w-4" />}
+                tone={summary.stats.active_sessions ? "blue" : "muted"}
+              />
+              <MetricCard
+                label="Requests"
+                value={formatNumber(summary.stats.request_count)}
+                detail={`${formatNumber(summary.stats.error_count)} errors · ${formatPercent(errorPercent)}`}
+                icon={<BarChart3 className="h-4 w-4" />}
+                tone={summary.stats.error_count ? "red" : "muted"}
+              />
+              <MetricCard
+                label="Reach"
+                value={formatNumber(summary.country_sources.length)}
+                detail={`${formatNumber(summary.stats.located_sources)} located sources · ${formatNumber(summary.stats.unknown_sources)} unknown`}
+                icon={<Globe2 className="h-4 w-4" />}
+                tone={summary.country_sources.length ? "blue" : "muted"}
+              />
             </section>
 
-            <section className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
-              <Card className="overflow-hidden">
-                <CardHeader>
+            <section className="grid min-w-0 items-stretch gap-5 lg:grid-cols-[minmax(0,1.6fr)_minmax(360px,1fr)]">
+              <Card className="flex min-h-[420px] min-w-0 flex-col overflow-hidden lg:min-h-[520px]">
+                <CardHeader className="items-start sm:items-center">
                   <CardTitle className="flex items-center gap-2">
                     <MapPinned className="h-4 w-4 text-primary" />
                     Source map
                   </CardTitle>
-                  <Badge variant="muted">{formatNumber(visibleCountrySources.length)} countries</Badge>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Badge variant="muted">{formatNumber(visibleCountrySources.length)} countries</Badge>
+                    <Badge variant={visibleOnlineTunnelCount ? "healthy" : "muted"}>
+                      {formatNumber(visibleOnlineTunnelCount)} online
+                    </Badge>
+                  </div>
                 </CardHeader>
-                <CardContent className="p-0">
+                <CardContent className="min-h-0 flex-1 p-0">
                   <TunnelSourceMap
                     countries={visibleCountrySources}
                     totalTunnels={visibleOnlineTunnelCount}
@@ -172,7 +207,7 @@ export default function PublicDashboardPage() {
               <RealtimeTrafficPanel />
             </section>
 
-            <Card>
+            <Card className="min-w-0">
               <CardHeader className="items-start gap-3 md:flex-row md:items-center">
                 <div>
                   <CardTitle className="flex items-center gap-2">
@@ -405,32 +440,49 @@ function RealtimeTrafficPanel() {
 
   useEffect(() => {
     let cancelled = false;
+    let requestInFlight = false;
 
     async function load() {
+      if (cancelled || requestInFlight || document.visibilityState === "hidden") return;
+      requestInFlight = true;
+      const controller = new AbortController();
+      const requestTimeout = window.setTimeout(() => controller.abort(), 5000);
+
       try {
-        const next = await publicApi<NetworkSnapshot>("/api/v1/network");
+        const next = await publicApi<NetworkSnapshot>("/api/v1/network", { signal: controller.signal });
         if (cancelled) return;
 
         const previous = previousSnapshotRef.current;
-        const sample = networkHistoryPoint(previous, next);
         const rates = networkTunnelRates(previous, next);
         previousSnapshotRef.current = next;
         sessionStartBytesRef.current ??= totalNetworkBytes(next);
         setSnapshot(next);
         setTunnelRates(rates);
-        setHistory((current) => [...current, sample].slice(-NETWORK_HISTORY_LIMIT));
+        if (previous) {
+          const sample = networkHistoryPoint(previous, next);
+          setHistory((current) => [...current, sample].slice(-NETWORK_HISTORY_LIMIT));
+        }
         setLastLoadedAt(new Date(next.generated_at_unix_ms));
         setError("");
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        window.clearTimeout(requestTimeout);
+        requestInFlight = false;
       }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") load();
     }
 
     load();
     const timer = window.setInterval(load, 1000);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 
@@ -446,11 +498,12 @@ function RealtimeTrafficPanel() {
     .filter((tunnel) => tunnel.connected || tunnel.totalBytesPerSecond > 0)
     .sort((left, right) => right.totalBytesPerSecond - left.totalBytesPerSecond || left.subdomain.localeCompare(right.subdomain))
     .slice(0, 3);
+  const liveStatus = error ? "stale" : snapshot ? "live" : "loading";
 
   return (
-    <Card className="overflow-hidden">
+    <Card className="flex min-h-[480px] min-w-0 flex-col overflow-hidden lg:min-h-[520px]">
       <CardHeader>
-        <div>
+        <div className="min-w-0">
           <CardTitle className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
             Realtime traffic
@@ -459,35 +512,48 @@ function RealtimeTrafficPanel() {
             {lastLoadedAt ? `refreshed ${formatClock(lastLoadedAt)}` : "Collecting first sample"}
           </p>
         </div>
-        <Badge variant={error ? "danger" : "healthy"}>{error ? "error" : "live"}</Badge>
+        <Badge variant={liveStatus === "live" ? "healthy" : liveStatus === "stale" ? "warning" : "muted"}>
+          {liveStatus}
+        </Badge>
       </CardHeader>
-      <CardContent className="grid gap-4">
-        {error ? <ErrorState message={error} /> : null}
-        <div className="grid grid-cols-2 gap-2">
-          <TrafficMetric label="current" value={formatBytesPerSecond(current?.totalBytesPerSecond)} />
-          <TrafficMetric label="60s avg" value={formatBytesPerSecond(average)} />
-          <TrafficMetric label="60s peak" value={formatBytesPerSecond(peak)} />
-          <TrafficMetric label="session" value={formatBytes(sessionTraffic)} />
-        </div>
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+      <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+        {error ? (
+          <p className="truncate text-xs text-amber-700 dark:text-amber-300" role="status" title={error}>
+            Live updates interrupted. Showing the latest sample.
+          </p>
+        ) : null}
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-muted-foreground">Current throughput</p>
+            <div className="mt-1 truncate font-mono text-3xl font-semibold tabular-nums">
+              {formatBytesPerSecond(current?.totalBytesPerSecond)}
+            </div>
+          </div>
+          <div className="grid min-w-48 grid-cols-2 gap-x-4 gap-y-1 text-xs">
             <span className="flex items-center gap-1 text-muted-foreground">
-              <ArrowDown className="h-3.5 w-3.5" />
+              <ArrowDown className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
               In
             </span>
-            <span className="font-medium">{formatBytesPerSecond(current?.inBytesPerSecond)}</span>
-          </div>
-          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="text-right font-mono font-medium tabular-nums">
+              {formatBytesPerSecond(current?.inBytesPerSecond)}
+            </span>
             <span className="flex items-center gap-1 text-muted-foreground">
-              <ArrowUp className="h-3.5 w-3.5" />
+              <ArrowUp className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
               Out
             </span>
-            <span className="font-medium">{formatBytesPerSecond(current?.outBytesPerSecond)}</span>
+            <span className="text-right font-mono font-medium tabular-nums">
+              {formatBytesPerSecond(current?.outBytesPerSecond)}
+            </span>
           </div>
         </div>
         <TrafficSparkline points={history} />
+        <div className="grid grid-cols-3 divide-x divide-border rounded-md border border-border bg-secondary/20">
+          <TrafficMetric label="60s avg" value={formatBytesPerSecond(average)} />
+          <TrafficMetric label="60s peak" value={formatBytesPerSecond(peak)} />
+          <TrafficMetric label="Page total" value={formatBytes(sessionTraffic)} />
+        </div>
         <div className="grid gap-2">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-muted-foreground">
             <span>Top tunnels</span>
             <span>
               {formatNumber(snapshot?.active_sessions || 0)} sessions / {formatNumber(snapshot?.active_streams || 0)} streams
@@ -496,22 +562,26 @@ function RealtimeTrafficPanel() {
           {topTunnels.length ? (
             <div className="grid gap-2">
               {topTunnels.map((tunnel) => (
-                <div key={tunnel.subdomain} className="grid gap-1 rounded-md border border-border px-3 py-2">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="min-w-0 truncate font-medium">{tunnel.subdomain}</span>
-                    <span className="shrink-0 font-mono text-xs">{formatBytesPerSecond(tunnel.totalBytesPerSecond)}</span>
+                <div key={tunnel.subdomain} className="flex min-h-10 items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", tunnel.connected ? "bg-emerald-500" : "bg-muted-foreground")} />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{tunnel.subdomain}</div>
+                      <div className="truncate text-[11px] text-muted-foreground">
+                        {formatBytesPerSecond(tunnel.inBytesPerSecond)} in · {formatBytesPerSecond(tunnel.outBytesPerSecond)} out
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>
-                      {formatBytesPerSecond(tunnel.inBytesPerSecond)} in / {formatBytesPerSecond(tunnel.outBytesPerSecond)} out
-                    </span>
-                    <span>{formatNumber(tunnel.activeStreams)} streams</span>
-                  </div>
+                  <span className="shrink-0 font-mono text-xs font-medium tabular-nums">
+                    {formatBytesPerSecond(tunnel.totalBytesPerSecond)}
+                  </span>
                 </div>
               ))}
             </div>
           ) : (
-            <EmptyState label={snapshot ? "No active traffic" : "Collecting first sample"} />
+            <div className="rounded-md border border-dashed border-border px-3 py-3 text-center text-xs text-muted-foreground">
+              {snapshot ? "No active traffic" : "Collecting first sample"}
+            </div>
           )}
         </div>
       </CardContent>
@@ -521,16 +591,16 @@ function RealtimeTrafficPanel() {
 
 function TrafficMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-border bg-secondary/30 px-3 py-2">
-      <div className="text-[11px] uppercase tracking-[0.08em] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate font-mono text-sm font-semibold">{value}</div>
+    <div className="min-w-0 px-2 py-2.5 text-center sm:px-3">
+      <div className="truncate text-[11px] font-medium text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate font-mono text-xs font-semibold tabular-nums sm:text-sm" title={value}>{value}</div>
     </div>
   );
 }
 
 function TrafficSparkline({ points }: { points: NetworkHistoryPoint[] }) {
-  const width = 320;
-  const height = 116;
+  const width = 360;
+  const height = 126;
   const padding = 8;
   const maxValue = Math.max(1, ...points.map((point) => point.totalBytesPerSecond));
   const totalLine = sparklinePath(points, (point) => point.totalBytesPerSecond, width, height, padding, maxValue);
@@ -539,18 +609,44 @@ function TrafficSparkline({ points }: { points: NetworkHistoryPoint[] }) {
   const area = sparklineAreaPath(points, (point) => point.totalBytesPerSecond, width, height, padding, maxValue);
 
   return (
-    <div className="h-36 rounded-md border border-border bg-background p-3">
-      {points.length < 2 ? (
-        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Collecting first sample</div>
-      ) : (
-        <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" role="img" aria-label="Realtime traffic trend">
-          <path d={area} fill="rgba(10, 148, 242, 0.14)" />
-          <path d={totalLine} fill="none" stroke="#0A94F2" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-          <path d={inLine} fill="none" stroke="#16A34A" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
-          <path d={outLine} fill="none" stroke="#F59E0B" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
-        </svg>
-      )}
+    <div className="grid gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+        <span>Last 60 seconds</span>
+        <div className="flex items-center gap-3" aria-hidden="true">
+          <ChartLegend color="bg-primary" label="Total" />
+          <ChartLegend color="bg-emerald-500" label="In" />
+          <ChartLegend color="bg-amber-500" label="Out" />
+        </div>
+      </div>
+      <div className="h-36 rounded-md border border-border bg-background p-2">
+        {points.length < 2 ? (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Collecting samples</div>
+        ) : (
+          <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full" role="img" aria-label="Total, inbound, and outbound traffic over the last 60 seconds">
+            {[padding, height / 2, height - padding].map((y) => (
+              <line key={y} x1={padding} x2={width - padding} y1={y} y2={y} stroke="currentColor" strokeOpacity="0.08" />
+            ))}
+            <path d={area} fill="rgba(10, 148, 242, 0.12)" />
+            <path d={totalLine} fill="none" stroke="#0A94F2" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+            <path d={inLine} fill="none" stroke="#16A34A" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+            <path d={outLine} fill="none" stroke="#F59E0B" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+          </svg>
+        )}
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-muted-foreground" aria-hidden="true">
+        <span>60s ago</span>
+        <span>now</span>
+      </div>
     </div>
+  );
+}
+
+function ChartLegend({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={cn("h-0.5 w-4", color)} />
+      {label}
+    </span>
   );
 }
 
@@ -585,6 +681,12 @@ function TunnelSourceMap({
     260,
     Math.floor(Math.min(mapFrameWidth || 760, (mapFrameHeight || 420) / WORLD_MAP_HEIGHT_RATIO)),
   );
+  const tooltipLeft = tooltip
+    ? Math.max(8, Math.min(tooltip.x + 12, Math.max(8, mapFrameWidth - 184)))
+    : 0;
+  const tooltipTop = tooltip
+    ? Math.max(8, Math.min(tooltip.y + 12, Math.max(8, mapFrameHeight - 76)))
+    : 0;
 
   function showTooltip(event: PointerEvent<HTMLDivElement>) {
     const root = mapRootRef.current;
@@ -620,59 +722,69 @@ function TunnelSourceMap({
   }
 
   return (
-    <div
-      ref={mapRootRef}
-      className="relative h-[clamp(280px,34vw,460px)] overflow-hidden border-t border-border bg-sky-50 dark:bg-[#07111f]"
-      onPointerMove={showTooltip}
-      onPointerLeave={() => setTooltip(null)}
-    >
-      <div ref={mapFrameRef} className="absolute inset-x-0 bottom-9 top-0 flex items-center justify-center overflow-hidden px-2 md:bottom-10">
-        <div>
-          <WorldMap
-            data={data}
-            color="#0A94F2"
-            size={mapSize}
-            frame={false}
-            backgroundColor="transparent"
-            borderColor="rgba(14, 116, 144, 0.22)"
-            containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
-            tooltipTextFunction={() => ""}
-            styleFunction={(context) => countryStyle(context, maxTunnels)}
-          />
+    <div className="flex h-full min-h-0 flex-col bg-sky-50 dark:bg-[#07111f]">
+      <div
+        ref={mapRootRef}
+        className="relative min-h-0 flex-1 overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        role="img"
+        tabIndex={0}
+        aria-label={`World map showing ${formatNumber(totalTunnels)} online tunnels across ${formatNumber(countries.length)} countries`}
+        onPointerMove={showTooltip}
+        onPointerDown={showTooltip}
+        onPointerLeave={() => setTooltip(null)}
+      >
+        <div ref={mapFrameRef} className="absolute inset-0 flex items-center justify-center overflow-hidden px-2">
+          <div>
+            <WorldMap
+              data={data}
+              color="#0A94F2"
+              size={mapSize}
+              frame={false}
+              backgroundColor="transparent"
+              borderColor="rgba(14, 116, 144, 0.22)"
+              containerClassName="worldmap__wrapper flex w-full justify-center [&_.worldmap__figure-container]:shrink-0"
+              tooltipTextFunction={() => ""}
+              styleFunction={(context) => countryStyle(context, maxTunnels)}
+            />
+          </div>
         </div>
+        {tooltip ? (
+          <div
+            className="pointer-events-none absolute z-10 w-44 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg"
+            style={{ left: tooltipLeft, top: tooltipTop }}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="truncate font-medium">{tooltip.name}</span>
+              <span className="shrink-0 text-muted-foreground">{tooltip.code}</span>
+            </div>
+            <div className="mt-1 grid gap-0.5 text-muted-foreground">
+              <span>Tunnels: {formatNumber(tooltip.tunnelCount)}</span>
+            </div>
+          </div>
+        ) : null}
+        {countries.length === 0 ? (
+          <div className="absolute inset-0 flex items-center justify-center px-4">
+            <div className="rounded-md border border-border bg-background/80 px-4 py-3 text-center text-sm text-muted-foreground shadow-sm backdrop-blur">
+              {totalTunnels > 0 ? "No country data for online tunnels" : "No online tunnels"}
+            </div>
+          </div>
+        ) : null}
+        <ul className="sr-only">
+          {countries.map((country) => (
+            <li key={country.country_code}>
+              {country.country || country.country_code}: {formatNumber(country.tunnel_count)} tunnels
+            </li>
+          ))}
+        </ul>
       </div>
-      {tooltip ? (
-        <div
-          className="pointer-events-none absolute z-10 w-44 rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-lg"
-          style={{
-            left: tooltip.x,
-            top: tooltip.y,
-            transform: tooltip.x > (mapFrameWidth || mapSize) - 220 ? "translate(-100%, 12px)" : "translate(12px, 12px)",
-          }}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <span className="truncate font-medium">{tooltip.name}</span>
-            <span className="shrink-0 text-muted-foreground">{tooltip.code}</span>
-          </div>
-          <div className="mt-1 grid gap-0.5 text-muted-foreground">
-            <span>Tunnels: {formatNumber(tooltip.tunnelCount)}</span>
-          </div>
-        </div>
-      ) : null}
-      <div className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
-          <span className="h-2.5 w-10 rounded-sm bg-gradient-to-r from-sky-100 to-sky-500 ring-1 ring-border" />
-          <span>{formatNumber(totalTunnels)} online tunnels</span>
+      <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-t border-border bg-background/65 px-4 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2" aria-label="Tunnel density from low to high">
+          <span>Low</span>
+          <span className="h-2.5 w-20 rounded-sm bg-gradient-to-r from-sky-100 to-sky-500 ring-1 ring-border" />
+          <span>High</span>
         </div>
         {unknownTunnels > 0 ? <span>{formatNumber(unknownTunnels)} unknown</span> : null}
       </div>
-      {countries.length === 0 ? (
-        <div className="absolute inset-0 flex items-center justify-center px-4">
-          <div className="rounded-md border border-border bg-background/80 px-4 py-3 text-center text-sm text-muted-foreground shadow-sm backdrop-blur">
-            {totalTunnels > 0 ? "No country data for online tunnels" : "No online tunnels"}
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -778,7 +890,6 @@ function networkTunnelRates(previous: NetworkSnapshot | null, next: NetworkSnaps
     return {
       subdomain: tunnel.subdomain,
       connected: tunnel.connected,
-      activeStreams: tunnel.active_streams,
       inBytesPerSecond,
       outBytesPerSecond,
       totalBytesPerSecond: inBytesPerSecond + outBytesPerSecond,
@@ -1093,4 +1204,10 @@ function formatClock(value: Date) {
     minute: "2-digit",
     second: "2-digit",
   }).format(value);
+}
+
+function formatPercent(value: number) {
+  const normalized = Number.isFinite(value) ? Math.max(0, value) : 0;
+  const precision = normalized > 0 && normalized < 0.1 ? 2 : normalized < 10 ? 1 : 0;
+  return `${normalized.toFixed(precision)}%`;
 }
